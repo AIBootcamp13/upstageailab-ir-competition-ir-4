@@ -7,5 +7,6 @@ requires-python = ">=3.10.13"
 dependencies = [
     "elasticsearch==8.8.0",
     "openai==1.7.2",
+    "python-dotenv>=1.1.1",
     "sentence-transformers==2.2.2",
 ]

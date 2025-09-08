@@ -1,7 +1,11 @@
 import os
 import json
+from dotenv import load_dotenv
 from elasticsearch import Elasticsearch, helpers
 from sentence_transformers import SentenceTransformer
+
+# .env 파일에서 환경 변수 로드
+load_dotenv()
 
 # Sentence Transformer 모델 초기화 (한국어 임베딩 생성 가능한 어떤 모델도 가능)
 model = SentenceTransformer("snunlp/KR-SBERT-V40K-klueNLI-augSTS")
@@ -82,7 +86,9 @@ def dense_retrieve(query_str, size):
 
 
 es_username = "elastic"
-es_password = "Your Elasticsearch Password"
+es_password = os.getenv("ELASTICSEARCH_PASSWORD")
+if not es_password:
+    raise ValueError("ELASTICSEARCH_PASSWORD environment variable is required")
 
 # Elasticsearch client 생성
 es = Elasticsearch(['https://localhost:9200'], basic_auth=(es_username, es_password), ca_certs="./elasticsearch-8.8.0/config/certs/http_ca.crt")
@@ -165,8 +171,9 @@ for rst in search_result_retrieve['hits']['hits']:
 from openai import OpenAI
 import traceback
 
-# OpenAI API 키를 환경변수에 설정
-os.environ["OPENAI_API_KEY"] = "Your API Key"
+# OpenAI API 키 환경변수 확인
+if not os.getenv("OPENAI_API_KEY"):
+    raise ValueError("OPENAI_API_KEY environment variable is required")
 
 client = OpenAI()
 # 사용할 모델을 설정
