@@ -1,7 +1,15 @@
 import os
 import json
+from dotenv import load_dotenv
 from elasticsearch import Elasticsearch, helpers
 from sentence_transformers import SentenceTransformer
+
+# 현재 스크립트 파일의 디렉토리를 작업 디렉토리로 설정
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(SCRIPT_DIR)
+
+# .env 파일에서 환경 변수 로드
+load_dotenv()
 
 # Sentence Transformer 모델 초기화 (한국어 임베딩 생성 가능한 어떤 모델도 가능)
 model = SentenceTransformer("snunlp/KR-SBERT-V40K-klueNLI-augSTS")
@@ -82,10 +90,12 @@ def dense_retrieve(query_str, size):
 
 
 es_username = "elastic"
-es_password = "Your Elasticsearch Password"
+es_password = os.getenv("ELASTICSEARCH_PASSWORD")
+if not es_password:
+    raise ValueError("ELASTICSEARCH_PASSWORD environment variable is required")
 
 # Elasticsearch client 생성
-es = Elasticsearch(['https://localhost:9200'], basic_auth=(es_username, es_password), ca_certs="./elasticsearch-8.8.0/config/certs/http_ca.crt")
+es = Elasticsearch(['https://localhost:9200'], basic_auth=(es_username, es_password), ca_certs="/data/ephemeral/home/elasticsearch-8.8.0/config/certs/http_ca.crt")
 
 # Elasticsearch client 정보 확인
 print(es.info())
@@ -129,7 +139,7 @@ create_es_index("test", settings, mappings)
 
 # 문서의 content 필드에 대한 임베딩 생성
 index_docs = []
-with open("../data/documents.jsonl") as f:
+with open("../../input/data/documents.jsonl") as f:
     docs = [json.loads(line) for line in f]
 embeddings = get_embeddings_in_batches(docs)
                 
@@ -165,12 +175,22 @@ for rst in search_result_retrieve['hits']['hits']:
 from openai import OpenAI
 import traceback
 
-# OpenAI API 키를 환경변수에 설정
-os.environ["OPENAI_API_KEY"] = "Your API Key"
+# OpenAI API 키 환경변수 확인
+if not os.getenv("OPENAI_API_KEY"):
+    raise ValueError("OPENAI_API_KEY environment variable is required")
 
-client = OpenAI()
-# 사용할 모델을 설정
-llm_model = "gpt-4o-mini"
+# OpenAI Base URL과 Model 환경변수 로드
+openai_base_url = os.getenv("OPENAI_BASE_URL")
+openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # 기본값: gpt-4o-mini
+
+# OpenAI 클라이언트 생성 (base_url이 설정된 경우에만 사용)
+if openai_base_url:
+    client = OpenAI(base_url=openai_base_url)
+else:
+    client = OpenAI()
+
+# 사용할 모델을 환경변수에서 설정
+llm_model = openai_model
 
 # RAG 구현에 필요한 Question Answering을 위한 LLM  프롬프트
 persona_qa = """
@@ -289,5 +309,5 @@ def eval_rag(eval_filename, output_filename):
             idx += 1
 
 # 평가 데이터에 대해서 결과 생성 - 파일 포맷은 jsonl이지만 파일명은 csv 사용
-eval_rag("../data/eval.jsonl", "sample_submission.csv")
+eval_rag("../../input/data/eval.jsonl", "sample_submission.csv")
 

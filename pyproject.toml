@@ -1,0 +1,12 @@
+[project]
+name = "upstageailab-ir-competition-ir-4"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10.13"
+dependencies = [
+    "elasticsearch==8.8.0",
+    "openai>=1.30.0",
+    "python-dotenv>=1.1.1",
+    "sentence-transformers>=2.3.0",
+]
