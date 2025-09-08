@@ -179,9 +179,18 @@ import traceback
 if not os.getenv("OPENAI_API_KEY"):
     raise ValueError("OPENAI_API_KEY environment variable is required")
 
-client = OpenAI()
-# 사용할 모델을 설정
-llm_model = "gpt-4o-mini"
+# OpenAI Base URL과 Model 환경변수 로드
+openai_base_url = os.getenv("OPENAI_BASE_URL")
+openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # 기본값: gpt-4o-mini
+
+# OpenAI 클라이언트 생성 (base_url이 설정된 경우에만 사용)
+if openai_base_url:
+    client = OpenAI(base_url=openai_base_url)
+else:
+    client = OpenAI()
+
+# 사용할 모델을 환경변수에서 설정
+llm_model = openai_model
 
 # RAG 구현에 필요한 Question Answering을 위한 LLM  프롬프트
 persona_qa = """
