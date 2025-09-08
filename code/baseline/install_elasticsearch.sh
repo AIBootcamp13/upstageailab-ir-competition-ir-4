@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# 설치 경로를 user home directory로 변경
+cd ~
+
 # Elasticsearch 8.8.0 다운로드 및 압축 해제
 wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-8.8.0-linux-x86_64.tar.gz
 tar -xzvf elasticsearch-8.8.0-linux-x86_64.tar.gz
