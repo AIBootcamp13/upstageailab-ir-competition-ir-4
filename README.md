@@ -42,9 +42,21 @@ e.g.
 │   └── paper
 └── input
     └── data
-        ├── eval
-        └── train
+        ├── documents.jsonl
+        └── eval.jsonl
 ```
+
+### baseline 코드 실행
+```bash
+cd code/baseline
+
+# Elasticsearch 설치 (아직 설치 안한 경우만 설치)
+./install_elasticsearch.sh
+# "Please confirm that you would like to continue"에서 y 입력하고, 출력되는 비빌번호를 .env에 입력할것.
+
+uv run rag_with_elasticsearch.py
+```
+
 
 ## 3. Data descrption
 
