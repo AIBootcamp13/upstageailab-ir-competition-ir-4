@@ -4,4 +4,8 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10.13"
-dependencies = []
+dependencies = [
+    "elasticsearch==8.8.0",
+    "openai==1.7.2",
+    "sentence-transformers==2.2.2",
+]
