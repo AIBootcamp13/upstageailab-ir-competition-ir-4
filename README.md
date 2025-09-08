@@ -54,6 +54,10 @@ cd code/baseline
 ./install_elasticsearch.sh
 # "Please confirm that you would like to continue"에서 y 입력하고, 출력되는 비빌번호를 .env에 입력할것.
 
+# .env 생성하고 API 키 입력
+cp env_template.txt .env
+# OPENAI_API_KEY에 upstage api key입력
+
 uv run rag_with_elasticsearch.py
 ```
 
