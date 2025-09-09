@@ -181,22 +181,26 @@ def answer_question(messages, client, cfg, es, index_name):
             response["topk"].append(rst["_source"]["docid"])
             response["references"].append({"score": rst["_score"], "content": rst["_source"]["content"]})
 
-        """content = json.dumps(retrieved_context)
-        messages.append({"role": "assistant", "content": content})
-        msg = [{"role": "system", "content": persona_qa}] + messages
-        try:
-            qaresult = client.chat.completions.create(
-                    model=llm_model,
-                    messages=msg,
-                    temperature=0,
-                    seed=1,
-                    timeout=30
-                )
-        except Exception as e:
-            traceback.print_exc()
-            return response
-        response["answer"] = qaresult.choices[0].message.content"""
-        response["answer"] = result.choices[0].message.content
+        if cfg.qa.use_final_answer:
+            # 검색된 컨텍스트로 별도 QA 수행
+            content = json.dumps(retrieved_context)
+            messages.append({"role": "assistant", "content": content})
+            msg = [{"role": "system", "content": persona_qa}] + messages
+            try:
+                qaresult = client.chat.completions.create(
+                        model=cfg.model.name,
+                        messages=msg,
+                        temperature=cfg.model.temperature,
+                        seed=cfg.model.seed,
+                        timeout=cfg.model.qa_timeout
+                    )
+            except Exception as e:
+                traceback.print_exc()
+                return response
+            response["answer"] = qaresult.choices[0].message.content
+        else:
+            # 현재 방식: 검색 결과만 반환
+            response["answer"] = result.choices[0].message.content
 
     # 검색이 필요하지 않은 경우 바로 답변 생성
     else:

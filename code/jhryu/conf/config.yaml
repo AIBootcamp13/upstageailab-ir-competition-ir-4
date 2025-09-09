@@ -10,6 +10,10 @@ model:
 # 평가 설정
 eval:
   max_iterations: 10  # 0이면 제한 없음
+
+# QA 설정
+qa:
+  use_final_answer: false  # false면 검색만, true면 검색 결과로 별도 QA 수행
   
 # 검색 설정
 search:
