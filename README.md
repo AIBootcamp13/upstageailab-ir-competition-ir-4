@@ -54,7 +54,7 @@
 ```bash
 cd code/baseline
 
-# .env 생성하고 API 키 입력
+# .env 생성하고 LLM API 키 입력
 cp env_template.txt .env
 # OPENAI_API_KEY에 upstage api key입력
 
@@ -150,6 +150,10 @@ OPENAI_MODEL=선택(기본: gpt-4o-mini)
 - Dense 검색 가중치/재랭킹 혼합, 하이브리드 검색 성능 개선
 - Hydra 구성(`code/rag_with_hydra/conf/config.yaml`) 기반의 파이프라인 파라미터화 및 실험 관리
 
+<br>
+
 ---
+
+<br>
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/AIBootcamp13/upstageailab-ir-competition-ir-4)
