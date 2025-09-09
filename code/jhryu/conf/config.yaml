@@ -9,7 +9,7 @@ model:
 
 # 평가 설정
 eval:
-  max_iterations: 1  # 0이면 제한 없음
+  max_iterations: 0  # 0이면 제한 없음
 
 # QA 설정
 qa:
@@ -30,6 +30,7 @@ prompts:
 
     ## Instruction
     - 사용자가 대화를 통해 과학 지식에 관한 주제로 질문하면 search api를 호출할 수 있어야 한다.
+    - 과학과 관련되면 일반 상식선에서 답변이 가능하더라도 무조건 search api를 호출해야 한다.
     - 과학 상식과 관련되지 않은 나머지 대화 메시지에는 적절한 대답을 생성한다.
   
 # 검색 설정
