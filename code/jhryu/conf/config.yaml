@@ -1,0 +1,38 @@
+# 모델 설정
+model:
+  name: "solar-pro2"
+  temperature: 0
+  seed: 1
+  timeout: 10
+  reasoning_effort: "low"
+  qa_timeout: 30
+
+# 평가 설정
+eval:
+  max_iterations: 10  # 0이면 제한 없음
+  
+# 검색 설정
+search:
+  top_k: 3
+  num_candidates: 100
+  
+# 임베딩 설정
+embedding:
+  model_name: "snunlp/KR-SBERT-V40K-klueNLI-augSTS"
+  batch_size: 100
+
+# 인덱스 설정
+index:
+  name: "test"
+
+# Elasticsearch 설정
+elasticsearch:
+  username: "elastic"
+  hosts: ["https://localhost:9200"]
+  ca_certs: "/data/ephemeral/home/elasticsearch-8.8.0/config/certs/http_ca.crt"
+
+# 파일 경로 설정
+paths:
+  documents: "../../input/data/documents.jsonl"
+  eval_data: "../../input/data/eval.jsonl"
+  output: "sample_submission.csv"
