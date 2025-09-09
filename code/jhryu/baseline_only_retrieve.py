@@ -107,25 +107,26 @@ import traceback
 # 프롬프트들은 config.yaml에서 관리
 
 # Function calling에 사용할 함수 정의
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search",
-            "description": "search relevant documents",
-            "parameters": {
-                "properties": {
-                    "standalone_query": {
-                        "type": "string",
-                        "description": "Final query suitable for use in search from the user messages history."
-                    }
-                },
-                "required": ["standalone_query"],
-                "type": "object"
+def get_tools(cfg):
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "search relevant documents",
+                "parameters": {
+                    "properties": {
+                        "standalone_query": {
+                            "type": "string",
+                            "description": cfg.prompts.standalone_query_description
+                        }
+                    },
+                    "required": ["standalone_query"],
+                    "type": "object"
+                }
             }
-        }
-    },
-]
+        },
+    ]
 
 
 # LLM과 검색엔진을 활용한 RAG 구현
@@ -139,7 +140,7 @@ def answer_question(messages, client, cfg, es, index_name):
         result = client.chat.completions.create(
             model=cfg.model.name,
             messages=msg,
-            tools=tools,
+            tools=get_tools(cfg),
             #tool_choice={"type": "function", "function": {"name": "search"}},
             temperature=cfg.model.temperature,
             seed=cfg.model.seed,

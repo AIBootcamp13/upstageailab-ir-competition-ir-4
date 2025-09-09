@@ -4,8 +4,8 @@ model:
   temperature: 0
   seed: 1
   timeout: 10
-  reasoning_effort: "high"
-  qa_timeout: 300
+  reasoning_effort: "low"
+  qa_timeout: 30
 
 # 평가 설정
 eval:
@@ -30,10 +30,9 @@ prompts:
 
     ## Instruction
     - 사용자가 대화를 통해 과학 지식에 관한 주제로 질문하면 search api를 호출할 수 있어야 한다.
-    - 과학과 관련되면 일반 상식선에서 답변이 가능하더라도 무조건 search api를 호출해야 한다.
     - 과학 상식과 관련되지 않은 나머지 대화 메시지에는 적절한 대답을 생성한다.
   
-  standalone_query_description: "Final korean query suitable for use in search from the user messages history."
+  standalone_query_description: "Final query suitable for use in search from the user messages history."
   
 # 검색 설정
 search:
