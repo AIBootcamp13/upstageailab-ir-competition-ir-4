@@ -102,24 +102,7 @@ import traceback
 
 # OpenAI 설정들은 main 함수에서 초기화
 
-# RAG 구현에 필요한 Question Answering을 위한 LLM  프롬프트
-persona_qa = """
-## Role: 과학 상식 전문가
-
-## Instructions
-- 사용자의 이전 메시지 정보 및 주어진 Reference 정보를 활용하여 간결하게 답변을 생성한다.
-- 주어진 검색 결과 정보로 대답할 수 없는 경우는 정보가 부족해서 답을 할 수 없다고 대답한다.
-- 한국어로 답변을 생성한다.
-"""
-
-# RAG 구현에 필요한 질의 분석 및 검색 이외의 일반 질의 대응을 위한 LLM 프롬프트
-persona_function_calling = """
-## Role: 과학 상식 전문가
-
-## Instruction
-- 사용자가 대화를 통해 과학 지식에 관한 주제로 질문하면 search api를 호출할 수 있어야 한다.
-- 과학 상식과 관련되지 않은 나머지 대화 메시지에는 적절한 대답을 생성한다.
-"""
+# 프롬프트들은 config.yaml에서 관리
 
 # Function calling에 사용할 함수 정의
 tools = [
@@ -149,7 +132,7 @@ def answer_question(messages, client, cfg, es, index_name):
     response = {"standalone_query": "", "topk": [], "references": [], "answer": ""}
 
     # 질의 분석 및 검색 이외의 질의 대응을 위한 LLM 활용
-    msg = [{"role": "system", "content": persona_function_calling}] + messages
+    msg = [{"role": "system", "content": cfg.prompts.function_calling}] + messages
     try:
         result = client.chat.completions.create(
             model=cfg.model.name,
@@ -185,7 +168,7 @@ def answer_question(messages, client, cfg, es, index_name):
             # 검색된 컨텍스트로 별도 QA 수행
             content = json.dumps(retrieved_context)
             messages.append({"role": "assistant", "content": content})
-            msg = [{"role": "system", "content": persona_qa}] + messages
+            msg = [{"role": "system", "content": cfg.prompts.qa}] + messages
             try:
                 qaresult = client.chat.completions.create(
                         model=cfg.model.name,
