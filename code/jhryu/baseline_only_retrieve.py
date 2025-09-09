@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from dotenv import load_dotenv
 from elasticsearch import Elasticsearch, helpers
 from sentence_transformers import SentenceTransformer
@@ -23,13 +24,14 @@ def get_embedding(sentences, model):
 
 # 주어진 문서의 리스트에서 배치 단위로 임베딩 생성
 def get_embeddings_in_batches(docs, model, batch_size=100):
+    log = logging.getLogger(__name__)
     batch_embeddings = []
     for i in range(0, len(docs), batch_size):
         batch = docs[i:i + batch_size]
         contents = [doc["content"] for doc in batch]
         embeddings = get_embedding(contents, model)
         batch_embeddings.extend(embeddings)
-        print(f'batch {i}')
+        log.info(f'Processing batch {i}')
     return batch_embeddings
 
 
@@ -194,16 +196,16 @@ def answer_question(messages, client, cfg, es, index_name):
 
 # 평가를 위한 파일을 읽어서 각 평가 데이터에 대해서 결과 추출후 파일에 저장
 def eval_rag(eval_filename, output_filename, client, cfg, es, index_name):
+    log = logging.getLogger(__name__)
     with open(eval_filename) as f, open(output_filename, "w") as of:
         idx = 0
         for line in f:
             j = json.loads(line)
-            print(f'Test {idx}\nQuestion: {j["msg"]}')
+            log.info(f'Test {idx} - Question: {j["msg"]}')
             response = answer_question(j["msg"], client, cfg, es, index_name)
-            print(f'Answer: {response["answer"]}\n')
-            print(f'topk length: {len(response["topk"])}\n')
-            print(f'topk: {response["topk"]}\n')
-            print(f'references length: {len(response["references"])}\n')
+            log.info(f'Answer: {response["answer"]}')
+            log.info(f'Retrieved {len(response["topk"])} documents: {response["topk"]}')
+            log.debug(f'References: {len(response["references"])} items')
 
             # 대회 score 계산은 topk 정보를 사용, answer 정보는 LLM을 통한 자동평가시 활용
             output = {"eval_id": j["eval_id"], "standalone_query": response["standalone_query"], "topk": response["topk"], "answer": response["answer"], "references": response["references"]}
@@ -215,6 +217,9 @@ def eval_rag(eval_filename, output_filename, client, cfg, es, index_name):
 
 @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
+    log = logging.getLogger(__name__)
+    log.info("Starting RAG evaluation process")
+    
     # OpenAI API 키 환경변수 확인
     if not os.getenv("OPENAI_API_KEY"):
         raise ValueError("OPENAI_API_KEY environment variable is required")
@@ -237,7 +242,7 @@ def main(cfg: DictConfig) -> None:
         basic_auth=(cfg.elasticsearch.username, es_password), 
         ca_certs=cfg.elasticsearch.ca_certs
     )
-    print(es.info())
+    log.info(f'Elasticsearch connection established: {es.info()}')
 
     # Sentence Transformer 모델 초기화
     model = SentenceTransformer(cfg.embedding.model_name)
@@ -290,23 +295,35 @@ def main(cfg: DictConfig) -> None:
 
     # 대량 문서 추가
     ret = bulk_add(es, cfg.index.name, index_docs)
-    print(ret)
+    log.info(f'Bulk indexing completed: {ret}')
 
     # 테스트 쿼리 실행
     test_query = "금성이 다른 행성들보다 밝게 보이는 이유는 무엇인가요?"
+    log.info(f'Running test query: {test_query}')
     
     # 역색인을 사용하는 검색 예제
     search_result_retrieve = sparse_retrieve(es, cfg.index.name, test_query, cfg.search.top_k)
+    log.info('Sparse retrieval results:')
     for rst in search_result_retrieve['hits']['hits']:
-        print('score:', rst['_score'], 'source:', rst['_source']["content"])
+        log.info(f'Score: {rst["_score"]:.4f}, Content: {rst["_source"]["content"][:100]}...')
 
     # Vector 유사도 사용한 검색 예제
     search_result_retrieve = dense_retrieve(es, model, cfg.index.name, test_query, cfg.search.top_k, cfg.search.num_candidates)
+    log.info('Dense retrieval results:')
     for rst in search_result_retrieve['hits']['hits']:
-        print('score:', rst['_score'], 'source:', rst['_source']["content"])
+        log.info(f'Score: {rst["_score"]:.4f}, Content: {rst["_source"]["content"][:100]}...')
 
     # 평가 데이터에 대해서 결과 생성
-    eval_rag(cfg.paths.eval_data, cfg.paths.output, client, cfg, es, cfg.index.name)
+    # CSV 파일을 Hydra outputs 디렉토리에 저장
+    from hydra.core.hydra_config import HydraConfig
+    hydra_output_dir = HydraConfig.get().runtime.output_dir
+    output_path = os.path.join(hydra_output_dir, cfg.paths.output)
+    
+    log.info(f'Current working directory: {os.getcwd()}')
+    log.info(f'Hydra output directory: {hydra_output_dir}')
+    log.info(f'Starting evaluation with output file: {output_path}')
+    eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name)
+    log.info('RAG evaluation process completed')
 
 
 if __name__ == "__main__":

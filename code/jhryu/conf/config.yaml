@@ -9,7 +9,7 @@ model:
 
 # 평가 설정
 eval:
-  max_iterations: 10  # 0이면 제한 없음
+  max_iterations: 1  # 0이면 제한 없음
 
 # QA 설정
 qa:
@@ -56,4 +56,4 @@ elasticsearch:
 paths:
   documents: "../../input/data/documents.jsonl"
   eval_data: "../../input/data/eval.jsonl"
-  output: "sample_submission.csv"
+  output: "sample_submission.csv"  # Hydra가 자동으로 outputs/{date}/{time}/ 폴더에 저장
