@@ -198,6 +198,8 @@ def answer_question(messages, client, cfg, es, index_name):
 # 평가를 위한 파일을 읽어서 각 평가 데이터에 대해서 결과 추출후 파일에 저장
 def eval_rag(eval_filename, output_filename, client, cfg, es, index_name):
     log = logging.getLogger(__name__)
+    general_questions = []  # 일반질문 eval_id, answer 저장 리스트
+    general_eval_ids = []   # eval_id만 저장 리스트
     with open(eval_filename) as f, open(output_filename, "w") as of:
         idx = 0
         for line in f:
@@ -205,8 +207,13 @@ def eval_rag(eval_filename, output_filename, client, cfg, es, index_name):
             log.info(f'Test {idx} - Question: {j["msg"]}')
             response = answer_question(j["msg"], client, cfg, es, index_name)
             log.info(f'Answer: {response["answer"]}')
-            log.info(f'Retrieved {len(response["topk"])} documents: {response["topk"]}')
+            log.info(f'Retrieved {"👆일반질문👆" if len(response["topk"]) == 0 else len(response["topk"])} documents: {response["topk"]}')
             log.debug(f'References: {len(response["references"])} items')
+
+            # 일반질문일 경우 리스트에 저장
+            if len(response["topk"]) == 0:
+                general_questions.append({"eval_id": j["eval_id"], "answer": response["answer"]})
+                general_eval_ids.append(j["eval_id"])
 
             # 대회 score 계산은 topk 정보를 사용, answer 정보는 LLM을 통한 자동평가시 활용
             output = {"eval_id": j["eval_id"], "standalone_query": response["standalone_query"], "topk": response["topk"], "answer": response["answer"], "references": response["references"]}
@@ -215,6 +222,14 @@ def eval_rag(eval_filename, output_filename, client, cfg, es, index_name):
 
             if cfg.eval.max_iterations > 0 and idx >= cfg.eval.max_iterations:
                 break
+
+    # 일반질문 eval_id 리스트와 갯수 로그에 출력
+    log.info(f'일반질문 eval_id 리스트 ({len(general_eval_ids)}개): {general_eval_ids}')
+
+    # chit_chat_ids를 제외한 최종 리스트 로그에 출력
+    chit_chat_ids = {2, 32, 57, 64, 67, 83, 90, 94, 103, 218, 220, 222, 227, 229, 245, 247, 261, 276, 283, 301}
+    filtered_eval_ids = [eid for eid in general_eval_ids if eid not in chit_chat_ids]
+    log.info(f'chit_chat_ids 제외 최종 eval_id 리스트 ({len(filtered_eval_ids)}개): {filtered_eval_ids}')
 
 @hydra.main(config_path="conf", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
