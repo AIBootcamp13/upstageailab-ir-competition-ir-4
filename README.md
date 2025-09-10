@@ -52,6 +52,9 @@
 
 ### baseline 코드 실행
 ```bash
+# UV 설치
+pip install uv
+
 cd code/baseline
 
 # .env 생성하고 LLM API 키 입력
