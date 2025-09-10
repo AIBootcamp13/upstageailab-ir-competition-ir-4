@@ -3,9 +3,9 @@ model:
   name: "solar-pro2"
   temperature: 0
   seed: 1
-  timeout: 10
+  timeout: 1000
   reasoning_effort: "high"
-  qa_timeout: 300
+  qa_timeout: 1000
 
 # 평가 설정
 eval:
@@ -29,9 +29,8 @@ prompts:
     ## Role: 과학 상식 전문가
 
     ## Instruction
-    - 사용자가 대화를 통해 과학 지식에 관한 주제로 질문하면 search api를 호출할 수 있어야 한다.
-    - 과학과 관련되면 일반 상식선에서 답변이 가능하더라도 무조건 search api를 호출해야 한다.
-    - 과학 상식과 관련되지 않은 나머지 대화 메시지에는 적절한 대답을 생성한다.
+    - 지식에 대한 질문이 아닌 chit-chat 혹은 잡담 대화 메시지에는 search api를 호출하지 말고 적절한 대답을 생성한다.
+    - 그외 사용자가 대화를 통해 상식 혹은 지식에 관한 주제로 질문하면 search api를 호출할 수 있어야 한다. 일반 상식선에서 답변이 가능하더라도 무조건 search api를 호출해야 한다.
   
   standalone_query_description: "Final korean query suitable for use in search from the user messages history."
   
