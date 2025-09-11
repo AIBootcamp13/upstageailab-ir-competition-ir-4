@@ -332,11 +332,19 @@ def main(cfg: DictConfig) -> None:
     # 평가 데이터에 대해서 결과 생성
     # CSV 파일을 Hydra outputs 디렉토리에 저장
     from hydra.core.hydra_config import HydraConfig
-    hydra_output_dir = HydraConfig.get().runtime.output_dir
+    import datetime
+    import pytz
+    # 한국표준시(KST)로 시간 폴더 생성
+    kst = pytz.timezone('Asia/Seoul')
+    now_kst = datetime.datetime.now(kst)
+    date_str = now_kst.strftime('%Y-%m-%d')
+    time_str = now_kst.strftime('%H-%M-%S')
+    hydra_output_dir = os.path.join('outputs', date_str, time_str)
+    os.makedirs(hydra_output_dir, exist_ok=True)
     output_path = os.path.join(hydra_output_dir, cfg.paths.output)
-    
+
     log.info(f'Current working directory: {os.getcwd()}')
-    log.info(f'Hydra output directory: {hydra_output_dir}')
+    log.info(f'Hydra output directory (KST): {hydra_output_dir}')
     log.info(f'Starting evaluation with output file: {output_path}')
     eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name)
     log.info('RAG evaluation process completed')
