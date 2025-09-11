@@ -102,13 +102,30 @@ def initialize_reranker(cfg):
     
     try:
         log.info(f"Loading reranker model: {cfg.reranker.model_name}")
-        tokenizer = AutoTokenizer.from_pretrained(cfg.reranker.model_name)
-        model = AutoModelForCausalLM.from_pretrained(cfg.reranker.model_name).eval()
         
-        # GPU 사용 가능 시 모델을 GPU로 이동
+        # PyTorch 메모리 캐시 정리
         if torch.cuda.is_available():
-            model = model.cuda()
-            log.info("Reranker model moved to GPU")
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            log.info("PyTorch GPU 메모리 캐시 정리 완료")
+        
+        tokenizer = AutoTokenizer.from_pretrained(cfg.reranker.model_name)
+        
+        # GPU 사용 가능 시 직접 GPU에서 float16으로 로드
+        if torch.cuda.is_available():
+            log.info("직접 GPU에서 float16으로 모델 로드...")
+            model = AutoModelForCausalLM.from_pretrained(
+                cfg.reranker.model_name, 
+                dtype=torch.float16,
+                device_map="auto"
+            ).eval()
+            log.info(f"Reranker model loaded on GPU with float16 precision")
+            log.info(f"GPU 메모리 사용량: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
+        else:
+            # CPU fallback
+            log.info("GPU 사용 불가, CPU에서 모델 로드...")
+            model = AutoModelForCausalLM.from_pretrained(cfg.reranker.model_name).eval()
+            log.info("Reranker model loaded on CPU")
         
         return tokenizer, model
     except Exception as e:
@@ -159,8 +176,10 @@ def rerank_documents(query, documents, reranker_tokenizer, reranker_model, cfg):
                 max_length=512
             )
             
-            # GPU 사용 시 inputs를 GPU로 이동
-            if torch.cuda.is_available():
+            # device_map="auto"로 로드된 모델의 디바이스에 입력을 맞춤
+            if hasattr(reranker_model, 'device') and reranker_model.device.type == 'cuda':
+                inputs = {k: v.to(reranker_model.device) for k, v in inputs.items()}
+            elif torch.cuda.is_available():
                 inputs = {k: v.cuda() for k, v in inputs.items()}
             
             with torch.no_grad():
