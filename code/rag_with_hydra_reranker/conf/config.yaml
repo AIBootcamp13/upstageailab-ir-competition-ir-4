@@ -37,8 +37,19 @@ prompts:
   
 # 검색 설정
 search:
-  top_k: 3
-  num_candidates: 100
+  sparse:
+    top_k: 100      # sparse_retrieve에서 가져올 문서 수
+  dense:
+    top_k: 100      # dense_retrieve에서 가져올 문서 수  
+    num_candidates: 100  # KNN 후보 수
+
+# 리랭커 설정
+reranker:
+  model_name: "Qwen/Qwen3-Reranker-8B"
+  batch_size: 16
+  instruction: "Given a web search query, retrieve relevant passages"
+  use_reranker: true
+  top_k: 3        # 리랭킹 후 최종 선택할 문서 수
   
 # 임베딩 설정
 embedding:

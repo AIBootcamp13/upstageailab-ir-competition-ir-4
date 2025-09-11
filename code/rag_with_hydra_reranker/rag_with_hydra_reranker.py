@@ -6,6 +6,8 @@ from elasticsearch import Elasticsearch, helpers
 from sentence_transformers import SentenceTransformer
 import hydra
 from omegaconf import DictConfig
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # 현재 스크립트 파일의 디렉토리를 작업 디렉토리로 설정
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -76,7 +78,7 @@ def sparse_retrieve(es, index_name, query_str, size):
 
 
 # Vector 유사도를 이용한 검색
-def dense_retrieve(es, model, index_name, query_str, size, num_candidates=100):
+def dense_retrieve(es, model, index_name, query_str, cfg):
     # 벡터 유사도 검색에 사용할 쿼리 임베딩 가져오기
     query_embedding = get_embedding([query_str], model)[0]
 
@@ -84,12 +86,113 @@ def dense_retrieve(es, model, index_name, query_str, size, num_candidates=100):
     knn = {
         "field": "embeddings",
         "query_vector": query_embedding.tolist(),
-        "k": size,
-        "num_candidates": num_candidates
+        "k": cfg.search.dense.top_k,
+        "num_candidates": cfg.search.dense.num_candidates
     }
 
     # 지정된 인덱스에서 벡터 유사도 검색 수행
     return es.search(index=index_name, knn=knn)
+
+
+# Qwen3-Reranker-8B 모델 초기화
+def initialize_reranker(cfg):
+    log = logging.getLogger(__name__)
+    if not cfg.reranker.use_reranker:
+        return None, None
+    
+    try:
+        log.info(f"Loading reranker model: {cfg.reranker.model_name}")
+        tokenizer = AutoTokenizer.from_pretrained(cfg.reranker.model_name)
+        model = AutoModelForCausalLM.from_pretrained(cfg.reranker.model_name).eval()
+        
+        # GPU 사용 가능 시 모델을 GPU로 이동
+        if torch.cuda.is_available():
+            model = model.cuda()
+            log.info("Reranker model moved to GPU")
+        
+        return tokenizer, model
+    except Exception as e:
+        log.error(f"Failed to load reranker model: {e}")
+        return None, None
+
+
+# 쿼리-문서 페어를 reranker 입력 형식으로 포맷팅
+def format_instruction(instruction, query, doc):
+    if instruction is None:
+        instruction = 'Given a web search query, retrieve relevant passages'
+    output = "<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {doc}".format(
+        instruction=instruction, query=query, doc=doc
+    )
+    return output
+
+
+# 문서들을 reranking하여 상위 문서들 반환
+def rerank_documents(query, documents, reranker_tokenizer, reranker_model, cfg):
+    log = logging.getLogger(__name__)
+    
+    if reranker_tokenizer is None or reranker_model is None:
+        log.warning("Reranker not initialized, returning original order")
+        return documents[:cfg.reranker.top_k]
+    
+    try:
+        # 각 문서에 대해 relevance score 계산
+        relevance_scores = []
+        
+        for i in range(0, len(documents), cfg.reranker.batch_size):
+            batch_docs = documents[i:i + cfg.reranker.batch_size]
+            batch_texts = []
+            
+            for doc in batch_docs:
+                formatted_text = format_instruction(
+                    cfg.reranker.instruction, 
+                    query, 
+                    doc["content"]
+                )
+                batch_texts.append(formatted_text)
+            
+            # 배치 토크나이징
+            inputs = reranker_tokenizer(
+                batch_texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=512
+            )
+            
+            # GPU 사용 시 inputs를 GPU로 이동
+            if torch.cuda.is_available():
+                inputs = {k: v.cuda() for k, v in inputs.items()}
+            
+            with torch.no_grad():
+                outputs = reranker_model(**inputs)
+                logits = outputs.logits
+                
+                # "yes"와 "no" 토큰의 ID 찾기
+                yes_token_id = reranker_tokenizer.encode("yes", add_special_tokens=False)[0]
+                no_token_id = reranker_tokenizer.encode("no", add_special_tokens=False)[0]
+                
+                # 마지막 토큰 위치에서 "yes"와 "no"의 확률 계산
+                last_token_logits = logits[:, -1, :]
+                yes_logits = last_token_logits[:, yes_token_id]
+                no_logits = last_token_logits[:, no_token_id]
+                
+                # softmax를 통해 relevance score 계산
+                scores = torch.softmax(torch.stack([no_logits, yes_logits], dim=1), dim=1)[:, 1]
+                relevance_scores.extend(scores.cpu().tolist())
+        
+        # 문서와 점수를 결합하여 정렬
+        doc_score_pairs = list(zip(documents, relevance_scores))
+        doc_score_pairs.sort(key=lambda x: x[1], reverse=True)
+        
+        # 상위 top_k 문서 반환
+        reranked_docs = [doc for doc, score in doc_score_pairs[:cfg.reranker.top_k]]
+        
+        log.info(f"Reranked {len(documents)} documents to top {len(reranked_docs)}")
+        return reranked_docs
+        
+    except Exception as e:
+        log.error(f"Error during reranking: {e}")
+        return documents[:cfg.reranker.top_k]
 
 
 # Elasticsearch 설정은 main 함수에서 초기화
@@ -130,7 +233,7 @@ def get_tools(cfg):
 
 
 # LLM과 검색엔진을 활용한 RAG 구현
-def answer_question(messages, client, cfg, es, index_name):
+def answer_question(messages, client, cfg, es, index_name, reranker_tokenizer=None, reranker_model=None):
     # 함수 출력 초기화
     response = {"standalone_query": "", "topk": [], "references": [], "answer": ""}
 
@@ -157,15 +260,33 @@ def answer_question(messages, client, cfg, es, index_name):
         function_args = json.loads(tool_call.function.arguments)
         standalone_query = function_args.get("standalone_query")
 
-        # Baseline으로는 sparse_retrieve만 사용하여 검색 결과 추출
-        search_result = sparse_retrieve(es, index_name, standalone_query, cfg.search.top_k)
+        # 초기 검색에서 문서 가져오기
+        search_result = sparse_retrieve(es, index_name, standalone_query, cfg.search.sparse.top_k)
 
         response["standalone_query"] = standalone_query
+        
+        # 검색된 문서들을 리스트로 변환
+        documents = []
+        for rst in search_result['hits']['hits']:
+            documents.append({
+                "content": rst["_source"]["content"],
+                "docid": rst["_source"]["docid"],
+                "score": rst["_score"]
+            })
+        
+        # Reranker가 활성화된 경우 reranking 수행
+        if cfg.reranker.use_reranker and reranker_tokenizer is not None and reranker_model is not None:
+            reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, cfg)
+        else:
+            # Reranker가 비활성화된 경우 상위 top_k개만 선택
+            reranked_documents = documents[:cfg.reranker.top_k]
+        
+        # 최종 결과를 response에 저장
         retrieved_context = []
-        for i,rst in enumerate(search_result['hits']['hits']):
-            retrieved_context.append(rst["_source"]["content"])
-            response["topk"].append(rst["_source"]["docid"])
-            response["references"].append({"score": rst["_score"], "content": rst["_source"]["content"]})
+        for doc in reranked_documents:
+            retrieved_context.append(doc["content"])
+            response["topk"].append(doc["docid"])
+            response["references"].append({"score": doc["score"], "content": doc["content"]})
 
         if cfg.qa.use_final_answer:
             # 검색된 컨텍스트로 별도 QA 수행
@@ -196,7 +317,7 @@ def answer_question(messages, client, cfg, es, index_name):
 
 
 # 평가를 위한 파일을 읽어서 각 평가 데이터에 대해서 결과 추출후 파일에 저장
-def eval_rag(eval_filename, output_filename, client, cfg, es, index_name):
+def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, reranker_tokenizer=None, reranker_model=None):
     log = logging.getLogger(__name__)
     general_questions = []  # 일반질문 eval_id, answer 저장 리스트
     general_eval_ids = []   # eval_id만 저장 리스트
@@ -205,7 +326,7 @@ def eval_rag(eval_filename, output_filename, client, cfg, es, index_name):
         for line in f:
             j = json.loads(line)
             log.info(f'Test {idx} - Question: {j["msg"]}')
-            response = answer_question(j["msg"], client, cfg, es, index_name)
+            response = answer_question(j["msg"], client, cfg, es, index_name, reranker_tokenizer, reranker_model)
             log.info(f'Answer: {response["answer"]}')
             log.info(f'Retrieved {"👆일반질문👆" if len(response["topk"]) == 0 else len(response["topk"])} documents: {response["topk"]}')
             log.debug(f'References: {len(response["references"])} items')
@@ -263,6 +384,9 @@ def main(cfg: DictConfig) -> None:
     # Sentence Transformer 모델 초기화
     model = SentenceTransformer(cfg.embedding.model_name)
 
+    # Reranker 모델 초기화
+    reranker_tokenizer, reranker_model = initialize_reranker(cfg)
+
     # Elasticsearch 인덱스 설정
     settings = {
         "analysis": {
@@ -318,13 +442,13 @@ def main(cfg: DictConfig) -> None:
     log.info(f'Running test query: {test_query}')
     
     # 역색인을 사용하는 검색 예제
-    search_result_retrieve = sparse_retrieve(es, cfg.index.name, test_query, cfg.search.top_k)
+    search_result_retrieve = sparse_retrieve(es, cfg.index.name, test_query, cfg.search.sparse.top_k)
     log.info('Sparse retrieval results:')
     for rst in search_result_retrieve['hits']['hits']:
         log.info(f'Score: {rst["_score"]:.4f}, Content: {rst["_source"]["content"][:100]}...')
 
     # Vector 유사도 사용한 검색 예제
-    search_result_retrieve = dense_retrieve(es, model, cfg.index.name, test_query, cfg.search.top_k, cfg.search.num_candidates)
+    search_result_retrieve = dense_retrieve(es, model, cfg.index.name, test_query, cfg)
     log.info('Dense retrieval results:')
     for rst in search_result_retrieve['hits']['hits']:
         log.info(f'Score: {rst["_score"]:.4f}, Content: {rst["_source"]["content"][:100]}...')
@@ -332,21 +456,13 @@ def main(cfg: DictConfig) -> None:
     # 평가 데이터에 대해서 결과 생성
     # CSV 파일을 Hydra outputs 디렉토리에 저장
     from hydra.core.hydra_config import HydraConfig
-    import datetime
-    import pytz
-    # 한국표준시(KST)로 시간 폴더 생성
-    kst = pytz.timezone('Asia/Seoul')
-    now_kst = datetime.datetime.now(kst)
-    date_str = now_kst.strftime('%Y-%m-%d')
-    time_str = now_kst.strftime('%H-%M-%S')
-    hydra_output_dir = os.path.join('outputs', date_str, time_str)
-    os.makedirs(hydra_output_dir, exist_ok=True)
+    hydra_output_dir = HydraConfig.get().runtime.output_dir
     output_path = os.path.join(hydra_output_dir, cfg.paths.output)
-
+    
     log.info(f'Current working directory: {os.getcwd()}')
-    log.info(f'Hydra output directory (KST): {hydra_output_dir}')
+    log.info(f'Hydra output directory: {hydra_output_dir}')
     log.info(f'Starting evaluation with output file: {output_path}')
-    eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name)
+    eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name, reranker_tokenizer, reranker_model)
     log.info('RAG evaluation process completed')
 
 
