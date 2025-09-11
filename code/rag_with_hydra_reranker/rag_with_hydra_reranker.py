@@ -7,7 +7,7 @@ from sentence_transformers import SentenceTransformer
 import hydra
 from omegaconf import DictConfig
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 # 현재 스크립트 파일의 디렉토리를 작업 디렉토리로 설정
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -114,33 +114,22 @@ def initialize_reranker(cfg):
         # GPU 사용 가능 시 직접 GPU에서 float16으로 로드
         if torch.cuda.is_available():
             log.info("직접 GPU에서 float16으로 모델 로드...")
-            model = AutoModelForCausalLM.from_pretrained(
+            model = AutoModelForSequenceClassification.from_pretrained(
                 cfg.reranker.model_name, 
-                dtype=torch.float16,
-                device_map="auto"
-            ).eval()
+                torch_dtype=torch.float16,
+            ).to('cuda').eval()
             log.info(f"Reranker model loaded on GPU with float16 precision")
             log.info(f"GPU 메모리 사용량: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
         else:
             # CPU fallback
             log.info("GPU 사용 불가, CPU에서 모델 로드...")
-            model = AutoModelForCausalLM.from_pretrained(cfg.reranker.model_name).eval()
+            model = AutoModelForSequenceClassification.from_pretrained(cfg.reranker.model_name).eval()
             log.info("Reranker model loaded on CPU")
         
         return tokenizer, model
     except Exception as e:
         log.error(f"Failed to load reranker model: {e}")
         return None, None
-
-
-# 쿼리-문서 페어를 reranker 입력 형식으로 포맷팅
-def format_instruction(instruction, query, doc):
-    if instruction is None:
-        instruction = 'Given a web search query, retrieve relevant passages'
-    output = "<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {doc}".format(
-        instruction=instruction, query=query, doc=doc
-    )
-    return output
 
 
 # 문서들을 reranking하여 상위 문서들 반환
@@ -152,51 +141,27 @@ def rerank_documents(query, documents, reranker_tokenizer, reranker_model, cfg):
         return documents[:cfg.reranker.top_k]
     
     try:
+        # 쿼리와 각 문서 내용을 쌍으로 구성
+        pairs = [[query, doc["content"]] for doc in documents]
+        
         # 각 문서에 대해 relevance score 계산
         relevance_scores = []
         
-        for i in range(0, len(documents), cfg.reranker.batch_size):
-            batch_docs = documents[i:i + cfg.reranker.batch_size]
-            batch_texts = []
-            
-            for doc in batch_docs:
-                formatted_text = format_instruction(
-                    cfg.reranker.instruction, 
-                    query, 
-                    doc["content"]
-                )
-                batch_texts.append(formatted_text)
-            
-            # 배치 토크나이징
-            inputs = reranker_tokenizer(
-                batch_texts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=512
-            )
-            
-            # device_map="auto"로 로드된 모델의 디바이스에 입력을 맞춤
-            if hasattr(reranker_model, 'device') and reranker_model.device.type == 'cuda':
-                inputs = {k: v.to(reranker_model.device) for k, v in inputs.items()}
-            elif torch.cuda.is_available():
-                inputs = {k: v.cuda() for k, v in inputs.items()}
-            
-            with torch.no_grad():
-                outputs = reranker_model(**inputs)
-                logits = outputs.logits
+        with torch.no_grad():
+            for i in range(0, len(pairs), cfg.reranker.batch_size):
+                batch_pairs = pairs[i:i + cfg.reranker.batch_size]
                 
-                # "yes"와 "no" 토큰의 ID 찾기
-                yes_token_id = reranker_tokenizer.encode("yes", add_special_tokens=False)[0]
-                no_token_id = reranker_tokenizer.encode("no", add_special_tokens=False)[0]
+                # 배치 토크나이징
+                inputs = reranker_tokenizer(
+                    batch_pairs,
+                    padding=True,
+                    truncation=True,
+                    return_tensors="pt",
+                    max_length=512
+                ).to('cuda' if torch.cuda.is_available() else 'cpu')
                 
-                # 마지막 토큰 위치에서 "yes"와 "no"의 확률 계산
-                last_token_logits = logits[:, -1, :]
-                yes_logits = last_token_logits[:, yes_token_id]
-                no_logits = last_token_logits[:, no_token_id]
-                
-                # softmax를 통해 relevance score 계산
-                scores = torch.softmax(torch.stack([no_logits, yes_logits], dim=1), dim=1)[:, 1]
+                # 모델에서 점수(logits) 직접 얻기
+                scores = reranker_model(**inputs, return_dict=True).logits.view(-1)
                 relevance_scores.extend(scores.cpu().tolist())
         
         # 문서와 점수를 결합하여 정렬
