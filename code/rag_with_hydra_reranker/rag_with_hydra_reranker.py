@@ -110,6 +110,14 @@ def initialize_reranker(cfg):
             log.info("PyTorch GPU 메모리 캐시 정리 완료")
         
         tokenizer = AutoTokenizer.from_pretrained(cfg.reranker.model_name)
+        # 배치 패딩을 위해 pad 토큰 보장
+        if tokenizer.pad_token is None:
+            if tokenizer.eos_token is not None:
+                tokenizer.pad_token = tokenizer.eos_token
+            elif tokenizer.sep_token is not None:
+                tokenizer.pad_token = tokenizer.sep_token
+            else:
+                tokenizer.add_special_tokens({"pad_token": "[PAD]"})
    
         # GPU 사용 가능 시 직접 GPU에서 float16으로 로드
         if torch.cuda.is_available():
@@ -118,12 +126,27 @@ def initialize_reranker(cfg):
                 cfg.reranker.model_name, 
                 torch_dtype=torch.float16,
             ).to('cuda').eval()
+            # 모델에 pad_token_id 반영 (필요 시 임베딩 리사이즈)
+            if getattr(model.config, 'pad_token_id', None) is None and tokenizer.pad_token_id is not None:
+                model.config.pad_token_id = tokenizer.pad_token_id
+            if hasattr(model, 'resize_token_embeddings') and tokenizer.pad_token_id is not None:
+                try:
+                    model.resize_token_embeddings(len(tokenizer))
+                except Exception:
+                    pass
             log.info(f"Reranker model loaded on GPU with float16 precision")
             log.info(f"GPU 메모리 사용량: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
         else:
             # CPU fallback
             log.info("GPU 사용 불가, CPU에서 모델 로드...")
             model = AutoModelForSequenceClassification.from_pretrained(cfg.reranker.model_name).eval()
+            if getattr(model.config, 'pad_token_id', None) is None and tokenizer.pad_token_id is not None:
+                model.config.pad_token_id = tokenizer.pad_token_id
+            if hasattr(model, 'resize_token_embeddings') and tokenizer.pad_token_id is not None:
+                try:
+                    model.resize_token_embeddings(len(tokenizer))
+                except Exception:
+                    pass
             log.info("Reranker model loaded on CPU")
         
         return tokenizer, model
@@ -135,48 +158,51 @@ def initialize_reranker(cfg):
 # 문서들을 reranking하여 상위 문서들 반환
 def rerank_documents(query, documents, reranker_tokenizer, reranker_model, cfg):
     log = logging.getLogger(__name__)
-    
+
     if reranker_tokenizer is None or reranker_model is None:
         log.warning("Reranker not initialized, returning original order")
         return documents[:cfg.reranker.top_k]
-    
+
     try:
-        # 쿼리와 각 문서 내용을 쌍으로 구성
-        pairs = [[query, doc["content"]] for doc in documents]
-        
-        # 각 문서에 대해 relevance score 계산 (개별 처리)
-        relevance_scores = []
-        
+        # 올바른 페어 토크나이징: (query, passage) 형태로 배치 구성
+        queries = [query] * len(documents)
+        passages = [doc["content"] for doc in documents]
+
+        device = next(reranker_model.parameters()).device if hasattr(reranker_model, "parameters") else (
+            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        )
+
         with torch.no_grad():
-            for pair in pairs:
-                # 개별 토크나이징 (배치 크기 1)
-                inputs = reranker_tokenizer(
-                    [pair],  # 단일 쌍을 리스트로 감싸기
-                    padding=True,
-                    truncation=True,
-                    return_tensors="pt",
-                    max_length=512
-                ).to('cuda' if torch.cuda.is_available() else 'cpu')
-                
-                # 모델에서 점수(logits) 직접 얻기
-                logits = reranker_model(**inputs, return_dict=True).logits.view(-1)
-                # 2개 클래스인 경우 두 번째 값(relevant) 사용, 1개인 경우 첫 번째 값 사용
-                if len(logits) == 2:
-                    score = logits[1].cpu().item()  # relevant score
+            enc = reranker_tokenizer(
+                queries,
+                passages,
+                padding=True,
+                truncation=True,
+                max_length=512,
+                return_tensors="pt",
+            )
+
+            # 배치 추론으로 점수 계산
+            relevance_scores = []
+            bs = max(1, int(cfg.reranker.batch_size))
+            for i in range(0, len(passages), bs):
+                batch = {k: v[i:i + bs].to(device) for k, v in enc.items()}
+                logits = reranker_model(**batch, return_dict=True).logits
+                # 이진 분류 모델이면 label 1(relevant) 로짓 사용, 단일 로짓이면 그대로 사용
+                if logits.shape[-1] == 2:
+                    scores = logits[:, 1]
                 else:
-                    score = logits[0].cpu().item()  # single score
-                relevance_scores.append(score)
-        
-        # 문서와 점수를 결합하여 정렬
+                    scores = logits.squeeze(-1)
+                relevance_scores.extend(scores.detach().float().cpu().tolist())
+
+        # 점수로 내림차순 정렬 후 top_k 선택
         doc_score_pairs = list(zip(documents, relevance_scores))
         doc_score_pairs.sort(key=lambda x: x[1], reverse=True)
-        
-        # 상위 top_k 문서 반환
-        reranked_docs = [doc for doc, score in doc_score_pairs[:cfg.reranker.top_k]]
-        
+        reranked_docs = [doc for doc, _ in doc_score_pairs[:cfg.reranker.top_k]]
+
         log.info(f"Reranked {len(documents)} documents to top {len(reranked_docs)}")
         return reranked_docs
-        
+
     except Exception as e:
         log.error(f"Error during reranking: {e}")
         return documents[:cfg.reranker.top_k]
@@ -262,7 +288,9 @@ def answer_question(messages, client, cfg, es, index_name, reranker_tokenizer=No
             })
         
         # Reranker가 활성화된 경우 reranking 수행
-        if cfg.reranker.use_reranker and reranker_tokenizer is not None and reranker_model is not None:
+        if cfg.reranker.use_reranker:
+            if reranker_tokenizer is None or reranker_model is None:
+                raise ValueError("Reranker가 활성화되었지만 토크나이저 또는 모델이 None입니다.")
             reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, cfg)
         else:
             # Reranker가 비활성화된 경우 상위 top_k개만 선택
@@ -455,4 +483,3 @@ def main(cfg: DictConfig) -> None:
 
 if __name__ == "__main__":
     main()
-
