@@ -156,6 +156,19 @@ def initialize_reranker(cfg):
 
 
 # 문서들을 reranking하여 상위 문서들 반환
+# 문서들을 reranking하여 상위 문서들 반환
+def _get_relevant_class_index(model):
+    try:
+        id2label = getattr(model.config, 'id2label', None)
+        if isinstance(id2label, dict) and len(id2label) == 2:
+            lowered = {int(k): str(v).lower() for k, v in id2label.items()}
+            for k, v in lowered.items():
+                if 'relev' in v or 'pos' in v or 'true' in v:
+                    return int(k)
+    except Exception:
+        pass
+    return 1
+
 def rerank_documents(query, documents, reranker_tokenizer, reranker_model, cfg):
     log = logging.getLogger(__name__)
 
@@ -185,12 +198,25 @@ def rerank_documents(query, documents, reranker_tokenizer, reranker_model, cfg):
             # 배치 추론으로 점수 계산
             relevance_scores = []
             bs = max(1, int(cfg.reranker.batch_size))
+            rel_idx = None
             for i in range(0, len(passages), bs):
                 batch = {k: v[i:i + bs].to(device) for k, v in enc.items()}
                 logits = reranker_model(**batch, return_dict=True).logits
-                # 이진 분류 모델이면 label 1(relevant) 로짓 사용, 단일 로짓이면 그대로 사용
+                # 이진 분류 모델이면 relevant 라벨 인덱스를 동적으로 선택
                 if logits.shape[-1] == 2:
-                    scores = logits[:, 1]
+                    if rel_idx is None:
+                        # 수동 지정 우선, 없으면 자동 판별
+                        try:
+                            cfg_rel = int(getattr(cfg.reranker, 'relevant_index', -1))
+                        except Exception:
+                            cfg_rel = -1
+                        rel_idx = cfg_rel if cfg_rel in (0, 1) else _get_relevant_class_index(reranker_model)
+                        try:
+                            labmap = getattr(reranker_model.config, 'id2label', None)
+                            logging.getLogger(__name__).info(f"Reranker relevant index={rel_idx}, id2label={labmap}")
+                        except Exception:
+                            pass
+                    scores = logits[:, rel_idx]
                 else:
                     scores = logits.squeeze(-1)
                 relevance_scores.extend(scores.detach().float().cpu().tolist())

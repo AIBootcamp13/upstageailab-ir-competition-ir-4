@@ -53,6 +53,7 @@ reranker:
   instruction: "Given a web search query, retrieve relevant passages"
   use_reranker: true
   top_k: 3        # 리랭킹 후 최종 선택할 문서 수
+  relevant_index: -1  # -1이면 자동 판별, 0/1로 수동 지정 가능 (이진 분류 모델)
   
 # 임베딩 설정
 embedding:
