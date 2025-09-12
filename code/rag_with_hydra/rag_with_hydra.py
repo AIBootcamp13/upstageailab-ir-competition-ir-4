@@ -3,9 +3,11 @@ import json
 import logging
 from dotenv import load_dotenv
 from elasticsearch import Elasticsearch, helpers
-from sentence_transformers import SentenceTransformer
+from langchain_upstage import UpstageEmbeddings
 import hydra
 from omegaconf import DictConfig
+from sklearn.decomposition import PCA
+import numpy as np
 
 # 현재 스크립트 파일의 디렉토리를 작업 디렉토리로 설정
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -17,19 +19,28 @@ load_dotenv()
 # Sentence Transformer 모델 - main 함수에서 초기화
 
 
-# SetntenceTransformer를 이용하여 임베딩 생성
-def get_embedding(sentences, model):
-    return model.encode(sentences)
 
+# UpstageEmbeddings를 이용하여 임베딩 생성
+def get_embedding(sentences, model, is_query=False):
+    if is_query:
+        return model.embed_query(sentences[0]) if len(sentences) == 1 else [model.embed_query(q) for q in sentences]
+    else:
+        return model.embed_documents(sentences)
+
+
+# 임베딩 모델 초기화 (Upstage API KEY 필요)
+embeddings = UpstageEmbeddings(model="solar-embedding-1-large")
 
 # 주어진 문서의 리스트에서 배치 단위로 임베딩 생성
+
+# 문서 임베딩 배치 생성 (passage embedding)
 def get_embeddings_in_batches(docs, model, batch_size=100):
     log = logging.getLogger(__name__)
     batch_embeddings = []
     for i in range(0, len(docs), batch_size):
         batch = docs[i:i + batch_size]
         contents = [doc["content"] for doc in batch]
-        embeddings = get_embedding(contents, model)
+        embeddings = get_embedding(contents, model, is_query=False)
         batch_embeddings.extend(embeddings)
         log.info(f'Processing batch {i}')
     return batch_embeddings
@@ -75,21 +86,29 @@ def sparse_retrieve(es, index_name, query_str, size):
     return es.search(index=index_name, query=query, size=size, sort="_score")
 
 
-# Vector 유사도를 이용한 검색
-def dense_retrieve(es, model, index_name, query_str, size, num_candidates=100):
-    # 벡터 유사도 검색에 사용할 쿼리 임베딩 가져오기
-    query_embedding = get_embedding([query_str], model)[0]
+# Vector 유사도를 이용한 검색 (query embedding)
+# ---- dense_retrieve 수정 ----
+def dense_retrieve(es, model, index_name, query_str, size, num_candidates=100, pca=None):
+    # 쿼리 임베딩 (4096차원)
+    query_embedding = get_embedding([query_str], model, is_query=True)
 
-    # KNN을 사용한 벡터 유사성 검색을 위한 매개변수 설정
+    # PCA 차원 축소 (768차원)
+    if pca is not None:
+        query_embedding_reduced = pca.transform([query_embedding])[0]
+    else:
+        query_embedding_reduced = query_embedding[:768]  # fallback
+
+    if hasattr(query_embedding_reduced, 'tolist'):
+        query_embedding_reduced = query_embedding_reduced.tolist()
+
     knn = {
         "field": "embeddings",
-        "query_vector": query_embedding.tolist(),
+        "query_vector": query_embedding_reduced,
         "k": size,
         "num_candidates": num_candidates
     }
-
-    # 지정된 인덱스에서 벡터 유사도 검색 수행
     return es.search(index=index_name, knn=knn)
+
 
 
 # Elasticsearch 설정은 main 함수에서 초기화
@@ -130,18 +149,15 @@ def get_tools(cfg):
 
 
 # LLM과 검색엔진을 활용한 RAG 구현
-def answer_question(messages, client, cfg, es, index_name):
-    # 함수 출력 초기화
+def answer_question(messages, client, cfg, es, index_name, dense_model=None):
     response = {"standalone_query": "", "topk": [], "references": [], "answer": ""}
 
-    # 질의 분석 및 검색 이외의 질의 대응을 위한 LLM 활용
     msg = [{"role": "system", "content": cfg.prompts.function_calling}] + messages
     try:
         result = client.chat.completions.create(
             model=cfg.model.name,
             messages=msg,
             tools=get_tools(cfg),
-            #tool_choice={"type": "function", "function": {"name": "search"}},
             temperature=cfg.model.temperature,
             seed=cfg.model.seed,
             timeout=cfg.model.timeout,
@@ -151,24 +167,36 @@ def answer_question(messages, client, cfg, es, index_name):
         traceback.print_exc()
         return response
 
-    # 검색이 필요한 경우 검색 호출후 결과를 활용하여 답변 생성
     if result.choices[0].message.tool_calls:
         tool_call = result.choices[0].message.tool_calls[0]
         function_args = json.loads(tool_call.function.arguments)
         standalone_query = function_args.get("standalone_query")
 
-        # Baseline으로는 sparse_retrieve만 사용하여 검색 결과 추출
-        search_result = sparse_retrieve(es, index_name, standalone_query, cfg.search.top_k)
+        # Hybrid retrieval: sparse + dense
+        sparse_result = sparse_retrieve(es, index_name, standalone_query, cfg.search.top_k)
+        dense_result = dense_retrieve(es, dense_model, index_name, standalone_query, cfg.search.top_k, cfg.search.num_candidates)
+
+        # 결과 합치기 (중복 docid 제거)
+        docids = set()
+        retrieved_context = []
+        for rst in sparse_result['hits']['hits']:
+            docid = rst["_source"]["docid"]
+            if docid not in docids:
+                docids.add(docid)
+                retrieved_context.append(rst["_source"]["content"])
+                response["topk"].append(docid)
+                response["references"].append({"score": rst["_score"], "content": rst["_source"]["content"]})
+        for rst in dense_result['hits']['hits']:
+            docid = rst["_source"]["docid"]
+            if docid not in docids:
+                docids.add(docid)
+                retrieved_context.append(rst["_source"]["content"])
+                response["topk"].append(docid)
+                response["references"].append({"score": rst["_score"], "content": rst["_source"]["content"]})
 
         response["standalone_query"] = standalone_query
-        retrieved_context = []
-        for i,rst in enumerate(search_result['hits']['hits']):
-            retrieved_context.append(rst["_source"]["content"])
-            response["topk"].append(rst["_source"]["docid"])
-            response["references"].append({"score": rst["_score"], "content": rst["_source"]["content"]})
 
         if cfg.qa.use_final_answer:
-            # 검색된 컨텍스트로 별도 QA 수행
             content = json.dumps(retrieved_context)
             messages.append({"role": "assistant", "content": content})
             msg = [{"role": "system", "content": cfg.prompts.qa}] + messages
@@ -185,7 +213,6 @@ def answer_question(messages, client, cfg, es, index_name):
                 return response
             response["answer"] = qaresult.choices[0].message.content
         else:
-            # 현재 방식: 검색 결과만 반환
             response["answer"] = result.choices[0].message.content
 
     # 검색이 필요하지 않은 경우 바로 답변 생성
@@ -196,7 +223,7 @@ def answer_question(messages, client, cfg, es, index_name):
 
 
 # 평가를 위한 파일을 읽어서 각 평가 데이터에 대해서 결과 추출후 파일에 저장
-def eval_rag(eval_filename, output_filename, client, cfg, es, index_name):
+def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, dense_model=None):
     log = logging.getLogger(__name__)
     general_questions = []  # 일반질문 eval_id, answer 저장 리스트
     general_eval_ids = []   # eval_id만 저장 리스트
@@ -205,7 +232,7 @@ def eval_rag(eval_filename, output_filename, client, cfg, es, index_name):
         for line in f:
             j = json.loads(line)
             log.info(f'Test {idx} - Question: {j["msg"]}')
-            response = answer_question(j["msg"], client, cfg, es, index_name)
+            response = answer_question(j["msg"], client, cfg, es, index_name, dense_model=dense_model)
             log.info(f'Answer: {response["answer"]}')
             log.info(f'Retrieved {"👆일반질문👆" if len(response["topk"]) == 0 else len(response["topk"])} documents: {response["topk"]}')
             log.debug(f'References: {len(response["references"])} items')
@@ -260,10 +287,14 @@ def main(cfg: DictConfig) -> None:
     )
     log.info(f'Elasticsearch connection established: {es.info()}')
 
-    # Sentence Transformer 모델 초기화
-    model = SentenceTransformer(cfg.embedding.model_name)
 
-    # Elasticsearch 인덱스 설정
+    # Upstage solar embedding 모델 초기화 (4096차원)
+    solar_model = UpstageEmbeddings(model="solar-embedding-1-large")
+
+    # Elasticsearch용 차원 축소 임베딩 모델 (예시: 768차원)
+    # 실제로는 별도의 차원 축소 모델을 사용하거나, solar 임베딩을 축소해야 함
+    # 여기서는 solar 임베딩을 받아서 앞 768개만 사용한다고 가정
+
     settings = {
         "analysis": {
             "analyzer": {
@@ -298,15 +329,22 @@ def main(cfg: DictConfig) -> None:
     # 인덱스 생성
     create_es_index(es, cfg.index.name, settings, mappings)
 
-    # 문서 임베딩 생성 및 인덱싱
+    # 문서 임베딩 생성 및 인덱싱 (solar: 4096차원, ES: 768차원)
     index_docs = []
+    solar_embeddings = []
     with open(cfg.paths.documents) as f:
         docs = [json.loads(line) for line in f]
-    
-    embeddings = get_embeddings_in_batches(docs, model, cfg.embedding.batch_size)
-    
-    for doc, embedding in zip(docs, embeddings):
-        doc["embeddings"] = embedding.tolist()
+
+    # solar embedding 전체 생성 (4096차원)
+    solar_embeds = get_embeddings_in_batches(docs, solar_model, cfg.embedding.batch_size)
+
+    # PCA 학습 (4096 -> 768)
+    pca = PCA(n_components=768)
+    solar_embeds_reduced = pca.fit_transform(solar_embeds)
+
+    # 문서에 축소된 임베딩 저장
+    for doc, reduced_embed in zip(docs, solar_embeds_reduced):
+        doc["embeddings"] = reduced_embed.tolist()
         index_docs.append(doc)
 
     # 대량 문서 추가
@@ -324,7 +362,7 @@ def main(cfg: DictConfig) -> None:
         log.info(f'Score: {rst["_score"]:.4f}, Content: {rst["_source"]["content"][:100]}...')
 
     # Vector 유사도 사용한 검색 예제
-    search_result_retrieve = dense_retrieve(es, model, cfg.index.name, test_query, cfg.search.top_k, cfg.search.num_candidates)
+    search_result_retrieve = dense_retrieve(es, solar_model, cfg.index.name, test_query, cfg.search.top_k, cfg.search.num_candidates)
     log.info('Dense retrieval results:')
     for rst in search_result_retrieve['hits']['hits']:
         log.info(f'Score: {rst["_score"]:.4f}, Content: {rst["_source"]["content"][:100]}...')
@@ -346,7 +384,7 @@ def main(cfg: DictConfig) -> None:
     log.info(f'Current working directory: {os.getcwd()}')
     log.info(f'Hydra output directory (KST): {hydra_output_dir}')
     log.info(f'Starting evaluation with output file: {output_path}')
-    eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name)
+    eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name, dense_model=solar_model)
     log.info('RAG evaluation process completed')
 
 
