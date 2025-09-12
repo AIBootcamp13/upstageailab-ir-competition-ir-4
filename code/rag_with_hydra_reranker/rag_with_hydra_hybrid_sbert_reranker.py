@@ -111,10 +111,6 @@ def initialize_reranker(cfg):
         
         tokenizer = AutoTokenizer.from_pretrained(cfg.reranker.model_name)
         
-        # 패딩 토큰이 없는 경우 설정
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        
         # GPU 사용 가능 시 직접 GPU에서 float16으로 로드
         if torch.cuda.is_available():
             log.info("직접 GPU에서 float16으로 모델 로드...")
@@ -148,16 +144,14 @@ def rerank_documents(query, documents, reranker_tokenizer, reranker_model, cfg):
         # 쿼리와 각 문서 내용을 쌍으로 구성
         pairs = [[query, doc["content"]] for doc in documents]
         
-        # 각 문서에 대해 relevance score 계산
+        # 각 문서에 대해 relevance score 계산 (개별 처리)
         relevance_scores = []
         
         with torch.no_grad():
-            for i in range(0, len(pairs), cfg.reranker.batch_size):
-                batch_pairs = pairs[i:i + cfg.reranker.batch_size]
-                
-                # 배치 토크나이징
+            for pair in pairs:
+                # 개별 토크나이징 (배치 크기 1)
                 inputs = reranker_tokenizer(
-                    batch_pairs,
+                    [pair],  # 단일 쌍을 리스트로 감싸기
                     padding=True,
                     truncation=True,
                     return_tensors="pt",
@@ -165,8 +159,13 @@ def rerank_documents(query, documents, reranker_tokenizer, reranker_model, cfg):
                 ).to('cuda' if torch.cuda.is_available() else 'cpu')
                 
                 # 모델에서 점수(logits) 직접 얻기
-                scores = reranker_model(**inputs, return_dict=True).logits.view(-1)
-                relevance_scores.extend(scores.cpu().tolist())
+                logits = reranker_model(**inputs, return_dict=True).logits.view(-1)
+                # 2개 클래스인 경우 두 번째 값(relevant) 사용, 1개인 경우 첫 번째 값 사용
+                if len(logits) == 2:
+                    score = logits[1].cpu().item()  # relevant score
+                else:
+                    score = logits[0].cpu().item()  # single score
+                relevance_scores.append(score)
         
         # 문서와 점수를 결합하여 정렬
         doc_score_pairs = list(zip(documents, relevance_scores))
