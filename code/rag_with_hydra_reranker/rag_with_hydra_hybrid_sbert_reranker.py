@@ -7,7 +7,8 @@ from sentence_transformers import SentenceTransformer
 import hydra
 from omegaconf import DictConfig
 import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers import AutoTokenizer, AutoModelForCausalLM
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # 현재 스크립트 파일의 디렉토리를 작업 디렉토리로 설정
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -94,89 +95,121 @@ def dense_retrieve(es, model, index_name, query_str, cfg):
     return es.search(index=index_name, knn=knn)
 
 
-# Qwen3-Reranker-8B 모델 초기화
+# 공식 사용법 기반 Qwen3-Reranker-8B 초기화 (CausalLM + yes/no)
 def initialize_reranker(cfg):
     log = logging.getLogger(__name__)
     if not cfg.reranker.use_reranker:
-        return None, None
-    
+        return None, None, None
+
     try:
-        log.info(f"Loading reranker model: {cfg.reranker.model_name}")
-        
-        # PyTorch 메모리 캐시 정리
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-            log.info("PyTorch GPU 메모리 캐시 정리 완료")
-        
-        tokenizer = AutoTokenizer.from_pretrained(cfg.reranker.model_name)
-        
-        # GPU 사용 가능 시 직접 GPU에서 float16으로 로드
-        if torch.cuda.is_available():
-            log.info("직접 GPU에서 float16으로 모델 로드...")
-            model = AutoModelForSequenceClassification.from_pretrained(
-                cfg.reranker.model_name, 
-                torch_dtype=torch.float16,
-            ).to('cuda').eval()
-            log.info(f"Reranker model loaded on GPU with float16 precision")
-            log.info(f"GPU 메모리 사용량: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB")
-        else:
-            # CPU fallback
-            log.info("GPU 사용 불가, CPU에서 모델 로드...")
-            model = AutoModelForSequenceClassification.from_pretrained(cfg.reranker.model_name).eval()
-            log.info("Reranker model loaded on CPU")
-        
-        return tokenizer, model
+        log.info(f"Loading reranker model (CausalLM): {cfg.reranker.model_name}")
+
+        kwargs = {}
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if device == 'cuda':
+            kwargs.update({
+                'dtype': torch.float16,
+            })
+
+        tokenizer = AutoTokenizer.from_pretrained(cfg.reranker.model_name, padding_side='left')
+
+        # pad 토큰 보장 (일부 토크나이저는 pad_token이 없을 수 있음)
+        if tokenizer.pad_token is None:
+            if tokenizer.eos_token is not None:
+                tokenizer.pad_token = tokenizer.eos_token
+            elif tokenizer.sep_token is not None:
+                tokenizer.pad_token = tokenizer.sep_token
+            else:
+                tokenizer.add_special_tokens({"pad_token": "[PAD]"})
+
+        model = AutoModelForCausalLM.from_pretrained(cfg.reranker.model_name, **kwargs).to(device).eval()
+
+        # yes/no 토큰 id
+        token_false_id = tokenizer.convert_tokens_to_ids("no")
+        token_true_id = tokenizer.convert_tokens_to_ids("yes")
+        max_length = 8192
+
+        # 공식 프리픽스/서픽스 템플릿
+        prefix = "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n"
+        suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        prefix_tokens = tokenizer.encode(prefix, add_special_tokens=False)
+        suffix_tokens = tokenizer.encode(suffix, add_special_tokens=False)
+
+        aux = {
+            'device': device,
+            'token_true_id': token_true_id,
+            'token_false_id': token_false_id,
+            'max_length': max_length,
+            'prefix_tokens': prefix_tokens,
+            'suffix_tokens': suffix_tokens,
+        }
+        log.info("Reranker(CausalLM) initialized")
+        return tokenizer, model, aux
     except Exception as e:
         log.error(f"Failed to load reranker model: {e}")
-        return None, None
+        return None, None, None
 
 
-# 문서들을 reranking하여 상위 문서들 반환
-def rerank_documents(query, documents, reranker_tokenizer, reranker_model, cfg):
+def _format_instruction(instruction, query, doc):
+    if instruction is None or len(str(instruction).strip()) == 0:
+        instruction = 'Given a web search query, retrieve relevant passages that answer the query'
+    return "<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {doc}".format(
+        instruction=instruction, query=query, doc=doc
+    )
+
+
+# 공식 사용법 기반 reranking
+def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg):
     log = logging.getLogger(__name__)
-    
-    if reranker_tokenizer is None or reranker_model is None:
+
+    if reranker_tokenizer is None or reranker_model is None or reranker_aux is None:
         log.warning("Reranker not initialized, returning original order")
         return documents[:cfg.reranker.top_k]
-    
+
     try:
-        # 쿼리와 각 문서 내용을 쌍으로 구성
-        pairs = [[query, doc["content"]] for doc in documents]
-        
-        # 각 문서에 대해 relevance score 계산 (개별 처리)
-        relevance_scores = []
-        
+        instruction = getattr(cfg.reranker, 'instruction', None)
+
+        # 입력 문자열 생성
+        pairs = [_format_instruction(instruction, query, doc["content"]) for doc in documents]
+
+        # 토크나이즈: prefix/suffix 길이를 고려해 본문 길이 제한, 이후 pad
+        max_length = reranker_aux['max_length']
+        prefix_tokens = reranker_aux['prefix_tokens']
+        suffix_tokens = reranker_aux['suffix_tokens']
+        device = reranker_aux['device']
+
+        inputs = reranker_tokenizer(
+            pairs,
+            padding=False,
+            truncation='longest_first',
+            return_attention_mask=False,
+            max_length=max_length - len(prefix_tokens) - len(suffix_tokens)
+        )
+        for i, ids in enumerate(inputs['input_ids']):
+            inputs['input_ids'][i] = prefix_tokens + ids + suffix_tokens
+
+        inputs = reranker_tokenizer.pad(inputs, padding=True, return_tensors="pt", max_length=max_length)
+        for key in inputs:
+            inputs[key] = inputs[key].to(device)
+
+        # 배치 추론으로 yes 확률 산출
         with torch.no_grad():
-            for pair in pairs:
-                # 개별 토크나이징 (배치 크기 1)
-                inputs = reranker_tokenizer(
-                    [pair],  # 단일 쌍을 리스트로 감싸기
-                    padding=True,
-                    truncation=True,
-                    return_tensors="pt",
-                    max_length=512
-                ).to('cuda' if torch.cuda.is_available() else 'cpu')
-                
-                # 모델에서 점수(logits) 직접 얻기
-                logits = reranker_model(**inputs, return_dict=True).logits.view(-1)
-                # 2개 클래스인 경우 두 번째 값(relevant) 사용, 1개인 경우 첫 번째 값 사용
-                if len(logits) == 2:
-                    score = logits[1].cpu().item()  # relevant score
-                else:
-                    score = logits[0].cpu().item()  # single score
-                relevance_scores.append(score)
-        
-        # 문서와 점수를 결합하여 정렬
-        doc_score_pairs = list(zip(documents, relevance_scores))
+            # 마지막 토큰 로짓에서 yes/no 점수 추출
+            batch_scores = reranker_model(**inputs).logits[:, -1, :]
+            true_vector = batch_scores[:, reranker_aux['token_true_id']]
+            false_vector = batch_scores[:, reranker_aux['token_false_id']]
+            batch_scores = torch.stack([false_vector, true_vector], dim=1)
+            batch_scores = torch.nn.functional.log_softmax(batch_scores, dim=1)
+            scores = batch_scores[:, 1].exp().tolist()  # P(yes)
+
+        # 점수로 내림차순 정렬 후 top_k 선택
+        doc_score_pairs = list(zip(documents, scores))
         doc_score_pairs.sort(key=lambda x: x[1], reverse=True)
-        
-        # 상위 top_k 문서 반환
-        reranked_docs = [doc for doc, score in doc_score_pairs[:cfg.reranker.top_k]]
-        
+        reranked_docs = [doc for doc, _ in doc_score_pairs[:cfg.reranker.top_k]]
+
         log.info(f"Reranked {len(documents)} documents to top {len(reranked_docs)}")
         return reranked_docs
-        
+
     except Exception as e:
         log.error(f"Error during reranking: {e}")
         return documents[:cfg.reranker.top_k]
@@ -220,7 +253,7 @@ def get_tools(cfg):
 
 
 # LLM과 검색엔진을 활용한 RAG 구현
-def answer_question(messages, client, cfg, es, index_name, model, reranker_tokenizer=None, reranker_model=None):
+def answer_question(messages, client, cfg, es, index_name, model, reranker_tokenizer=None, reranker_model=None, reranker_aux=None):
     # 함수 출력 초기화
     response = {"standalone_query": "", "topk": [], "references": [], "answer": ""}
 
@@ -277,7 +310,7 @@ def answer_question(messages, client, cfg, es, index_name, model, reranker_token
                 
         # Reranker가 활성화된 경우 reranking 수행
         if cfg.reranker.use_reranker and reranker_tokenizer is not None and reranker_model is not None:
-            reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, cfg)
+            reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg)
         else:
             # Reranker가 비활성화된 경우 상위 top_k개만 선택
             reranked_documents = documents[:cfg.reranker.top_k]
@@ -318,7 +351,7 @@ def answer_question(messages, client, cfg, es, index_name, model, reranker_token
 
 
 # 평가를 위한 파일을 읽어서 각 평가 데이터에 대해서 결과 추출후 파일에 저장
-def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, model, reranker_tokenizer=None, reranker_model=None):
+def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, model, reranker_tokenizer=None, reranker_model=None, reranker_aux=None):
     log = logging.getLogger(__name__)
     general_questions = []  # 일반질문 eval_id, answer 저장 리스트
     general_eval_ids = []   # eval_id만 저장 리스트
@@ -327,7 +360,7 @@ def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, model,
         for line in f:
             j = json.loads(line)
             log.info(f'🚩Test {idx} - Question: {j["msg"]}')
-            response = answer_question(j["msg"], client, cfg, es, index_name, model, reranker_tokenizer, reranker_model)
+            response = answer_question(j["msg"], client, cfg, es, index_name, model, reranker_tokenizer, reranker_model, reranker_aux)
             log.info(f'Answer: {response["answer"]}')
             log.info(f'Retrieved {"👆일반질문👆" if len(response["topk"]) == 0 else len(response["topk"])} documents: {response["topk"]}')
             log.debug(f'References: {len(response["references"])} items')
@@ -385,8 +418,8 @@ def main(cfg: DictConfig) -> None:
     # Sentence Transformer 모델 초기화
     model = SentenceTransformer(cfg.embedding.model_name)
 
-    # Reranker 모델 초기화
-    reranker_tokenizer, reranker_model = initialize_reranker(cfg)
+    # 공식 사용법 기반 Reranker 초기화
+    reranker_tokenizer, reranker_model, reranker_aux = initialize_reranker(cfg)
 
     # Elasticsearch 인덱스 설정
     settings = {
@@ -463,7 +496,7 @@ def main(cfg: DictConfig) -> None:
     log.info(f'Current working directory: {os.getcwd()}')
     log.info(f'Hydra output directory: {hydra_output_dir}')
     log.info(f'Starting evaluation with output file: {output_path}')
-    eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name, model, reranker_tokenizer, reranker_model)
+    eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name, model, reranker_tokenizer, reranker_model, reranker_aux)
     log.info('RAG evaluation process completed')
 
 
