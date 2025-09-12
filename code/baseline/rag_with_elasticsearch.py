@@ -299,7 +299,7 @@ def eval_rag(eval_filename, output_filename):
         idx = 0
         for line in f:
             j = json.loads(line)
-            print(f'Test {idx}\nQuestion: {j["msg"]}')
+            print(f'🚩Test {idx}\nQuestion: {j["msg"]}')
             response = answer_question(j["msg"])
             print(f'Answer: {response["answer"]}\n')
 

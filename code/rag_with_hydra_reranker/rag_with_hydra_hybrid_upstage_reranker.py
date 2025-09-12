@@ -9,6 +9,8 @@ import hydra
 from omegaconf import DictConfig
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from sklearn.decomposition import PCA
+import numpy as np
 
 # 현재 스크립트 파일의 디렉토리를 작업 디렉토리로 설정
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -82,24 +84,26 @@ def sparse_retrieve(es, index_name, query_str, size):
 
 
 # Vector 유사도를 이용한 검색 (query embedding)
-def dense_retrieve(es, model, index_name, query_str, size, num_candidates=100):
-    # 4096차원의 쿼리 임베딩 생성
+def dense_retrieve(es, model, index_name, query_str, size, num_candidates=100, pca=None):
+    # 쿼리 임베딩 (4096차원)
     query_embedding = get_embedding([query_str], model, is_query=True)
-    
-    # 768차원으로 축소 (인덱싱 때와 동일하게)
-    query_embedding_reduced = query_embedding[:768]
-    
+
+    # PCA 차원 축소 (768차원)
+    if pca is not None:
+        query_embedding_reduced = pca.transform([query_embedding])[0]
+    else:
+        query_embedding_reduced = query_embedding[:768]  # fallback
+
     if hasattr(query_embedding_reduced, 'tolist'):
         query_embedding_reduced = query_embedding_reduced.tolist()
 
     knn = {
         "field": "embeddings",
-        "query_vector": query_embedding_reduced, # 축소된 벡터 사용
+        "query_vector": query_embedding_reduced,
         "k": size,
         "num_candidates": num_candidates
     }
     return es.search(index=index_name, knn=knn)
-
 
 # Qwen3-Reranker-8B 모델 초기화
 def initialize_reranker(cfg):
@@ -333,7 +337,7 @@ def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, dense_
         idx = 0
         for line in f:
             j = json.loads(line)
-            log.info(f'Test {idx} - Question: {j["msg"]}')
+            log.info(f'🚩Test {idx} - Question: {j["msg"]}')
             response = answer_question(j["msg"], client, cfg, es, index_name, dense_model, reranker_tokenizer, reranker_model)
             log.info(f'Answer: {response["answer"]}')
             log.info(f'Retrieved {"👆일반질문👆" if len(response["topk"]) == 0 else len(response["topk"])} documents: {response["topk"]}')
@@ -440,12 +444,16 @@ def main(cfg: DictConfig) -> None:
 
     # solar embedding 전체 생성
     solar_embeds = get_embeddings_in_batches(docs, solar_model, cfg.embedding.batch_size)
-
-    for doc, solar_embed in zip(docs, solar_embeds):
-        # Elasticsearch용 임베딩 (앞 768개만 사용, 실제로는 차원 축소 필요)
-        doc["embeddings"] = solar_embed[:768]
+    
+    # PCA 학습 (4096 -> 768)
+    pca = PCA(n_components=768)
+    solar_embeds_reduced = pca.fit_transform(solar_embeds)
+    
+    # 문서에 축소된 임베딩 저장
+    for doc, reduced_embed in zip(docs, solar_embeds_reduced):
+        doc["embeddings"] = reduced_embed.tolist()
         index_docs.append(doc)
-
+        
     # 대량 문서 추가
     ret = bulk_add(es, cfg.index.name, index_docs)
     log.info(f'Bulk indexing completed: {ret}')

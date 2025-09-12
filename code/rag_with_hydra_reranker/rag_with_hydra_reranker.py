@@ -340,7 +340,7 @@ def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, rerank
         idx = 0
         for line in f:
             j = json.loads(line)
-            log.info(f'Test {idx} - Question: {j["msg"]}')
+            log.info(f'🚩Test {idx} - Question: {j["msg"]}')
             response = answer_question(j["msg"], client, cfg, es, index_name, reranker_tokenizer, reranker_model)
             log.info(f'Answer: {response["answer"]}')
             log.info(f'Retrieved {"👆일반질문👆" if len(response["topk"]) == 0 else len(response["topk"])} documents: {response["topk"]}')
