@@ -8,6 +8,7 @@ import hydra
 from omegaconf import DictConfig
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # 현재 스크립트 파일의 디렉토리를 작업 디렉토리로 설정
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -107,7 +108,7 @@ def initialize_reranker(cfg):
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if device == 'cuda':
             kwargs.update({
-                'torch_dtype': torch.float16,
+                'dtype': torch.float16,
             })
 
         tokenizer = AutoTokenizer.from_pretrained(cfg.reranker.model_name, padding_side='left')
