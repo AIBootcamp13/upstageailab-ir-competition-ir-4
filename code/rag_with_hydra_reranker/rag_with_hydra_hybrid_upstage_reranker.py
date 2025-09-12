@@ -118,6 +118,10 @@ def initialize_reranker(cfg):
         
         tokenizer = AutoTokenizer.from_pretrained(cfg.reranker.model_name)
         
+        # 패딩 토큰이 없는 경우 설정
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        
         # GPU 사용 가능 시 직접 GPU에서 float16으로 로드
         if torch.cuda.is_available():
             log.info("직접 GPU에서 float16으로 모델 로드...")
