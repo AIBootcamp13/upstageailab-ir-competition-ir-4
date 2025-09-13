@@ -71,21 +71,26 @@ def check_search_decision(messages, client, cfg):
             timeout=cfg.model.timeout,
             reasoning_effort=cfg.model.reasoning_effort
         )
-        
+
+        # LLM 답변 내용 캡처
+        assistant_response = result.choices[0].message.content or ""
+
         # 검색이 필요한 경우 tool_calls가 있음
         if result.choices[0].message.tool_calls:
             tool_call = result.choices[0].message.tool_calls[0]
             function_args = json.loads(tool_call.function.arguments)
             standalone_query = function_args.get("standalone_query", "")
-            
+
             return {
                 "search_called": True,
-                "standalone_query": standalone_query
+                "standalone_query": standalone_query,
+                "assistant_response": assistant_response
             }
         else:
             return {
                 "search_called": False,
-                "standalone_query": None
+                "standalone_query": None,
+                "assistant_response": assistant_response
             }
             
     except Exception as e:
@@ -94,6 +99,7 @@ def check_search_decision(messages, client, cfg):
         return {
             "search_called": False,
             "standalone_query": None,
+            "assistant_response": None,
             "error": str(e)
         }
 
@@ -158,7 +164,8 @@ def check_search_decisions_for_eval_ids(cfg: DictConfig, eval_ids, eval_filename
             "eval_id": eval_id,
             "question": user_question,
             "search_called": decision["search_called"],
-            "standalone_query": decision["standalone_query"]
+            "standalone_query": decision["standalone_query"],
+            "assistant_response": decision.get("assistant_response")
         }
 
         if "error" in decision:
@@ -173,10 +180,13 @@ def check_search_decisions_for_eval_ids(cfg: DictConfig, eval_ids, eval_filename
     search_called_count = 0
     for result in results:
         status = "🔍 검색 호출" if result["search_called"] else "💬 직접 답변"
-        print(f"eval_id {result['eval_id']}: {status}")
+        print(f"\neval_id {result['eval_id']}: {status}")
+        print(f"질문: {result['question']}")
         if result["search_called"]:
             search_called_count += 1
-            print(f"  └─ 검색 쿼리: {result['standalone_query']}")
+            print(f"검색 쿼리: {result['standalone_query']}")
+        if result.get("assistant_response"):
+            print(f"LLM 답변: {result['assistant_response']}")
 
     print(f"\n총 {len(results)}개 질문 중 {search_called_count}개가 검색 호출, {len(results) - search_called_count}개가 직접 답변")
 
