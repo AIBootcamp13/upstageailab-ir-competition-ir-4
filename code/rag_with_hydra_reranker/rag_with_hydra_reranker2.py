@@ -158,7 +158,7 @@ def _format_instruction(instruction, query, doc):
     )
 
 
-# 공식 사용법 기반 reranking
+# 공식 사용법 기반 reranking (배치 처리 및 메모리 관리 기능 추가)
 def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg):
     log = logging.getLogger(__name__)
 
@@ -168,50 +168,69 @@ def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reran
 
     try:
         instruction = getattr(cfg.reranker, 'instruction', None)
+        # config에서 batch_size를 가져오거나, 없으면 기본값(예: 2)으로 설정
+        batch_size = getattr(cfg.reranker, 'batch_size', 2)
 
-        # 입력 문자열 생성
-        pairs = [_format_instruction(instruction, query, doc["content"]) for doc in documents]
-
-        # 토크나이즈: prefix/suffix 길이를 고려해 본문 길이 제한, 이후 pad
-        max_length = reranker_aux['max_length']
-        prefix_tokens = reranker_aux['prefix_tokens']
-        suffix_tokens = reranker_aux['suffix_tokens']
+        all_scores = []
         device = reranker_aux['device']
 
-        inputs = reranker_tokenizer(
-            pairs,
-            padding=False,
-            truncation='longest_first',
-            return_attention_mask=False,
-            max_length=max_length - len(prefix_tokens) - len(suffix_tokens)
-        )
-        for i, ids in enumerate(inputs['input_ids']):
-            inputs['input_ids'][i] = prefix_tokens + ids + suffix_tokens
+        # 문서를 배치 단위로 나누어 처리
+        for i in range(0, len(documents), batch_size):
+            log.info(f"Reranking batch {i // batch_size + 1}...")
+            batch_docs = documents[i:i + batch_size]
 
-        inputs = reranker_tokenizer.pad(inputs, padding=True, return_tensors="pt", max_length=max_length)
-        for key in inputs:
-            inputs[key] = inputs[key].to(device)
+            # 입력 문자열 생성
+            pairs = [_format_instruction(instruction, query, doc["content"]) for doc in batch_docs]
 
-        # 배치 추론으로 yes 확률 산출
-        with torch.no_grad():
-            # 마지막 토큰 로짓에서 yes/no 점수 추출
-            batch_scores = reranker_model(**inputs).logits[:, -1, :]
-            true_vector = batch_scores[:, reranker_aux['token_true_id']]
-            false_vector = batch_scores[:, reranker_aux['token_false_id']]
-            batch_scores = torch.stack([false_vector, true_vector], dim=1)
-            batch_scores = torch.nn.functional.log_softmax(batch_scores, dim=1)
-            scores = batch_scores[:, 1].exp().tolist()  # P(yes)
+            # 토크나이즈
+            max_length = reranker_aux['max_length']
+            prefix_tokens = reranker_aux['prefix_tokens']
+            suffix_tokens = reranker_aux['suffix_tokens']
 
-        # 점수로 내림차순 정렬 후 top_k 선택
-        doc_score_pairs = list(zip(documents, scores))
+            inputs = reranker_tokenizer(
+                pairs,
+                padding=False,
+                truncation='longest_first',
+                return_attention_mask=False,
+                max_length=max_length - len(prefix_tokens) - len(suffix_tokens)
+            )
+            for j, ids in enumerate(inputs['input_ids']):
+                inputs['input_ids'][j] = prefix_tokens + ids + suffix_tokens
+
+            inputs = reranker_tokenizer.pad(inputs, padding=True, return_tensors="pt", max_length=max_length)
+
+            # 데이터를 GPU로 이동
+            for key in inputs:
+                inputs[key] = inputs[key].to(device)
+
+            # 배치 추론
+            with torch.no_grad():
+                batch_scores_logits = reranker_model(**inputs).logits[:, -1, :]
+                true_vector = batch_scores_logits[:, reranker_aux['token_true_id']]
+                false_vector = batch_scores_logits[:, reranker_aux['token_false_id']]
+                stacked_scores = torch.stack([false_vector, true_vector], dim=1)
+                log_softmax_scores = torch.nn.functional.log_softmax(stacked_scores, dim=1)
+                scores = log_softmax_scores[:, 1].exp().tolist()
+
+            all_scores.extend(scores)
+
+            # === 메모리 관리 코드 추가 ===
+            # 현재 배치에서 사용한 텐서들을 GPU 메모리에서 명시적으로 삭제
+            del inputs, batch_scores_logits, true_vector, false_vector, stacked_scores, log_softmax_scores
+            # PyTorch가 캐싱하고 있는 사용되지 않는 메모리를 GPU에서 해제
+            torch.cuda.empty_cache()
+            # =========================
+
+        # 전체 점수를 기준으로 정렬
+        doc_score_pairs = list(zip(documents, all_scores))
         doc_score_pairs.sort(key=lambda x: x[1], reverse=True)
         reranked_docs = [doc for doc, _ in doc_score_pairs[:cfg.reranker.top_k]]
 
-        log.info(f"Reranked {len(documents)} documents to top {len(reranked_docs)}")
+        log.info(f"Reranked {len(documents)} documents to top {len(reranked_docs)} using batch size {batch_size} with memory clearing")
         return reranked_docs
 
     except Exception as e:
-        log.error(f"Error during reranking: {e}")
+        log.error(f"Error during reranking: {e}", exc_info=True) # 에러 발생 시 상세 정보 출력
         return documents[:cfg.reranker.top_k]
 
 
