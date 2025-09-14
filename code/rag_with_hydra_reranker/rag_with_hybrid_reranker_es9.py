@@ -147,6 +147,54 @@ def dense_retrieve_sbert(es, model, index_name, query_str, size, num_candidates=
     }
     return es.search(index=index_name, knn=knn)
 
+# HyDE 기법: 가상 문서 생성 함수
+def generate_hypothetical_document(query, client, cfg):
+    """질의에 대해 LLM을 사용하여 가상의 답변 문서를 생성"""
+    log = logging.getLogger(__name__)
+    try:
+        hyde_prompt = getattr(cfg.retrieve.dense_upstage_hyde, 'hyde_prompt',
+                             '다음 질문에 대해 전문적이고 상세한 설명 문서를 작성해주세요.')
+
+        messages = [
+            {"role": "system", "content": hyde_prompt},
+            {"role": "user", "content": query}
+        ]
+
+        result = client.chat.completions.create(
+            model=cfg.model.name,
+            messages=messages,
+            temperature=cfg.model.temperature,
+            seed=cfg.model.seed,
+            timeout=cfg.model.timeout
+        )
+
+        hypothetical_doc = result.choices[0].message.content
+        log.debug(f"Generated hypothetical document for query: {query[:50]}...")
+        return hypothetical_doc
+
+    except Exception as e:
+        log.warning(f"Failed to generate hypothetical document: {e}")
+        # 실패 시 원본 질의 반환
+        return query
+
+# HyDE 기법을 활용한 Upstage Dense Retrieve
+def dense_retrieve_upstage_hyde(es, model, index_name, query_str, size, num_candidates, client, cfg):
+    """HyDE 기법: 질의 -> 가상문서 생성 -> 임베딩 -> 검색"""
+    # 1단계: 가상 문서 생성
+    hypothetical_doc = generate_hypothetical_document(query_str, client, cfg)
+
+    # 2단계: 가상 문서를 임베딩하여 검색 (기존 dense_retrieve_upstage와 동일)
+    query_embedding = upstage_get_embedding([hypothetical_doc], model, is_query=True)
+    if hasattr(query_embedding, 'tolist'):
+        query_embedding = query_embedding.tolist()
+    knn = {
+        "field": "embeddings_upstage",
+        "query_vector": query_embedding,
+        "k": size,
+        "num_candidates": num_candidates
+    }
+    return es.search(index=index_name, knn=knn)
+
 def retrieve_all(es, index_name):
     """모든 문서를 조회하여 리랭킹 후보로 사용하기 위한 리스트를 반환한다.
     score는 0.0으로 설정한다.
@@ -374,9 +422,10 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
         sparse_enabled = getattr(cfg.retrieve.sparse, 'enabled', True)
         upstage_enabled = getattr(cfg.retrieve.dense_upstage, 'enabled', False)
         sbert_enabled = getattr(cfg.retrieve.dense_sbert, 'enabled', False)
+        upstage_hyde_enabled = getattr(cfg.retrieve.dense_upstage_hyde, 'enabled', False)
 
         documents = []
-        if not sparse_enabled and not upstage_enabled and not sbert_enabled:
+        if not sparse_enabled and not upstage_enabled and not sbert_enabled and not upstage_hyde_enabled:
             # 리트리브 비활성화: 전체 문서를 리랭킹 대상으로 사용
             documents = retrieve_all(es, index_name)
         else:
@@ -415,6 +464,24 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                 dense_result = dense_retrieve_sbert(
                     es, ds.get('model'), index_name, standalone_query,
                     cfg.retrieve.dense_sbert.top_k, cfg.retrieve.dense_sbert.num_candidates
+                )
+                for rst in dense_result['hits']['hits']:
+                    src = rst.get("_source", {})
+                    docid = src.get("docid")
+                    if docid and docid not in docids:
+                        docids.add(docid)
+                        documents.append({
+                            "content": src.get("content", ""),
+                            "docid": docid,
+                            "score": rst.get("_score", 0.0)
+                        })
+            # HyDE 기법을 활용한 Upstage Dense Retrieve
+            if upstage_hyde_enabled and dense_ctx and dense_ctx.get('upstage_hyde'):
+                duh = dense_ctx['upstage_hyde']
+                dense_result = dense_retrieve_upstage_hyde(
+                    es, duh.get('model'), index_name, standalone_query,
+                    cfg.retrieve.dense_upstage_hyde.top_k, cfg.retrieve.dense_upstage_hyde.num_candidates,
+                    client, cfg
                 )
                 for rst in dense_result['hits']['hits']:
                     src = rst.get("_source", {})
@@ -547,9 +614,11 @@ def main(cfg: DictConfig) -> None:
     # Retrieve 백엔드 활성화 여부
     upstage_enabled = getattr(cfg.retrieve.dense_upstage, 'enabled', False)
     sbert_enabled = getattr(cfg.retrieve.dense_sbert, 'enabled', False)
+    upstage_hyde_enabled = getattr(cfg.retrieve.dense_upstage_hyde, 'enabled', False)
 
     # 백엔드별 모델 초기화 (활성화된 경우에만)
-    solar_model = UpstageEmbeddings(model=cfg.retrieve.dense_upstage.model_name) if upstage_enabled else None
+    # upstage 또는 upstage_hyde가 활성화된 경우 solar_model 필요
+    solar_model = UpstageEmbeddings(model=cfg.retrieve.dense_upstage.model_name) if (upstage_enabled or upstage_hyde_enabled) else None
     sbert_model = SentenceTransformer(cfg.retrieve.dense_sbert.model_name) if sbert_enabled else None
 
     # Elasticsearch 인덱스 설정
@@ -595,8 +664,8 @@ def main(cfg: DictConfig) -> None:
         }
     }
 
-    # Upstage 임베딩이 활성화된 경우에만 필드 추가
-    if upstage_enabled:
+    # Upstage 임베딩이 활성화된 경우에만 필드 추가 (일반 upstage 또는 hyde 방식 모두 동일한 필드 사용)
+    if upstage_enabled or upstage_hyde_enabled:
         mappings["properties"]["embeddings_upstage"] = {
             "type": "dense_vector",
             "dims": 4096,
@@ -627,9 +696,9 @@ def main(cfg: DictConfig) -> None:
         with open(cfg.paths.documents) as f:
             docs = [json.loads(line) for line in f]
 
-        # Upstage(4096 차원 그대로 사용)
+        # Upstage(4096 차원 그대로 사용) - 일반 upstage 또는 hyde 방식 모두 동일한 임베딩 사용
         solar_embeds = None
-        if upstage_enabled and solar_model is not None:
+        if (upstage_enabled or upstage_hyde_enabled) and solar_model is not None:
             solar_embeds = get_embeddings_in_batches(docs, solar_model, cfg.embedding.batch_size)
 
         # SBERT(768)
@@ -694,6 +763,7 @@ def main(cfg: DictConfig) -> None:
     dense_ctx = {
         'upstage': {'model': solar_model} if upstage_enabled and solar_model is not None else None,
         'sbert': {'model': sbert_model} if sbert_enabled and sbert_model is not None else None,
+        'upstage_hyde': {'model': solar_model} if upstage_hyde_enabled and solar_model is not None else None,
     }
     eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name, dense_ctx)
     log.info('RAG evaluation process completed')

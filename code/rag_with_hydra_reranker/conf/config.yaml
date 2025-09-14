@@ -53,15 +53,19 @@ retrieve:
     model_name: "snunlp/KR-SBERT-V40K-klueNLI-augSTS"
     top_k: 30       # dense_retrieve_sbert에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
+  dense_upstage_hyde:
+    enabled: false  # HyDE 기법을 활용한 Upstage 임베딩 활성화 여부 (dense_upstage와 동일한 모델 사용)
+    top_k: 30       # dense_retrieve_upstage_hyde에서 가져올 문서 수
+    num_candidates: 500  # KNN 후보 수
+    hyde_prompt: "다음 질문에 대해 전문적이고 상세한 설명 문서를 작성해주세요. 과학적 사실과 정확한 정보를 바탕으로 체계적으로 서술하세요."
 
 # 리랭커 설정
 reranker:
-  model_name: "Qwen/Qwen3-Reranker-4B"
-  batch_size: 16
+  model_name: "Qwen/Qwen3-Reranker-8B"
+  batch_size: 4
   instruction: "Given a web search query, retrieve relevant passages"
   use_reranker: true
   top_k: 3        # 리랭킹 후 최종 선택할 문서 수
-  relevant_index: -1  # -1이면 자동 판별, 0/1로 수동 지정 가능 (이진 분류 모델)
   
 # 임베딩 배치 설정 (모델명은 각 retrieve 섹션에 정의)
 embedding:
