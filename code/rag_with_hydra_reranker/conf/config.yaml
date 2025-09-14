@@ -75,7 +75,8 @@ index:
 elasticsearch:
   username: "elastic"
   hosts: ["https://localhost:9200"]
-  ca_certs: "/data/ephemeral/home/elasticsearch-8.8.0/config/certs/http_ca.crt"
+  # ca_certs: "/data/ephemeral/home/elasticsearch-8.8.0/config/certs/http_ca.crt"
+  ca_certs: "/data/ephemeral/home/elasticsearch-9.0.3/config/certs/http_ca.crt"
 
 # 파일 경로 설정
 paths:
