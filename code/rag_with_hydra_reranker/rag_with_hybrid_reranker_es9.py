@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import psutil
 from dotenv import load_dotenv
 from elasticsearch import Elasticsearch, helpers
 from sentence_transformers import SentenceTransformer
@@ -9,8 +10,6 @@ import hydra
 from omegaconf import DictConfig
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from sklearn.decomposition import PCA
-import numpy as np
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # 현재 스크립트 파일의 디렉토리를 작업 디렉토리로 설정
@@ -19,6 +18,36 @@ os.chdir(SCRIPT_DIR)
 
 # .env 파일에서 환경 변수 로드
 load_dotenv()
+
+# 메모리 사용량 측정 유틸리티 함수
+def log_memory_usage(log, message=""):
+    """CPU와 GPU 메모리 사용량을 로그에 출력"""
+    try:
+        # CPU 메모리 (RAM)
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        cpu_memory_mb = memory_info.rss / 1024 / 1024  # MB 단위
+
+        # 시스템 전체 메모리
+        system_memory = psutil.virtual_memory()
+        total_memory_gb = system_memory.total / 1024 / 1024 / 1024  # GB 단위
+        available_memory_gb = system_memory.available / 1024 / 1024 / 1024  # GB 단위
+        used_percent = system_memory.percent
+
+        log_msg = f"{message} - CPU 메모리: {cpu_memory_mb:.1f}MB, 시스템 메모리: {used_percent:.1f}% 사용 ({available_memory_gb:.1f}GB/{total_memory_gb:.1f}GB 가용)"
+
+        # GPU 메모리 (PyTorch CUDA 사용 시)
+        if torch.cuda.is_available():
+            gpu_memory_allocated = torch.cuda.memory_allocated() / 1024 / 1024 / 1024  # GB 단위
+            gpu_memory_reserved = torch.cuda.memory_reserved() / 1024 / 1024 / 1024  # GB 단위
+            gpu_total_memory = torch.cuda.get_device_properties(0).total_memory / 1024 / 1024 / 1024  # GB 단위
+            log_msg += f", GPU 메모리: {gpu_memory_allocated:.1f}GB 할당/{gpu_memory_reserved:.1f}GB 예약/{gpu_total_memory:.1f}GB 총용량"
+        else:
+            log_msg += ", GPU: 사용 불가"
+
+        log.info(log_msg)
+    except Exception as e:
+        log.warning(f"메모리 사용량 측정 실패: {e}")
 
 # Sentence Transformer 모델 - main 함수에서 초기화
 
@@ -48,13 +77,18 @@ def get_embeddings_in_batches(docs, model, batch_size=100):
 
 
 # 새로운 index 생성
-def create_es_index(es, index, settings, mappings):
+def create_es_index(es, index, settings, mappings, force_recreate=True):
     # 인덱스가 이미 존재하는지 확인
     if es.indices.exists(index=index):
-        # 인덱스가 이미 존재하면 설정을 새로운 것으로 갱신하기 위해 삭제
-        es.indices.delete(index=index)
-    # 지정된 설정으로 새로운 인덱스 생성
-    es.indices.create(index=index, settings=settings, mappings=mappings)
+        if force_recreate:
+            # 인덱스가 이미 존재하면 설정을 새로운 것으로 갱신하기 위해 삭제
+            es.indices.delete(index=index)
+            # 지정된 설정으로 새로운 인덱스 생성
+            es.indices.create(index=index, settings=settings, mappings=mappings)
+        # force_recreate가 False면 기존 인덱스를 그대로 사용
+    else:
+        # 인덱스가 없으면 새로 생성
+        es.indices.create(index=index, settings=settings, mappings=mappings)
 
 
 # 지정된 인덱스 삭제
@@ -88,16 +122,14 @@ def sparse_retrieve(es, index_name, query_str, size):
 
 
 # Vector 유사도를 이용한 검색 (backend별)
-def dense_retrieve_upstage(es, model, pca, index_name, query_str, size, num_candidates=100):
+def dense_retrieve_upstage(es, model, index_name, query_str, size, num_candidates=100):
     # 쿼리 임베딩 (4096차원)
     query_embedding = upstage_get_embedding([query_str], model, is_query=True)
-    # PCA 차원 축소 (768차원)
-    query_embedding_reduced = pca.transform([query_embedding])[0] if pca is not None else query_embedding[:768]
-    if hasattr(query_embedding_reduced, 'tolist'):
-        query_embedding_reduced = query_embedding_reduced.tolist()
+    if hasattr(query_embedding, 'tolist'):
+        query_embedding = query_embedding.tolist()
     knn = {
         "field": "embeddings_upstage",
-        "query_vector": query_embedding_reduced,
+        "query_vector": query_embedding,
         "k": size,
         "num_candidates": num_candidates
     }
@@ -365,7 +397,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             if upstage_enabled and dense_ctx and dense_ctx.get('upstage'):
                 du = dense_ctx['upstage']
                 dense_result = dense_retrieve_upstage(
-                    es, du.get('model'), du.get('pca'), index_name, standalone_query,
+                    es, du.get('model'), index_name, standalone_query,
                     cfg.retrieve.dense_upstage.top_k, cfg.retrieve.dense_upstage.num_candidates
                 )
                 for rst in dense_result['hits']['hits']:
@@ -438,8 +470,18 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
 
 
 # 평가를 위한 파일을 읽어서 각 평가 데이터에 대해서 결과 추출후 파일에 저장
-def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, dense_ctx=None, reranker_tokenizer=None, reranker_model=None, reranker_aux=None):
+def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, dense_ctx=None):
     log = logging.getLogger(__name__)
+
+    # 리랭킹 모델 로드 전 메모리 사용량 확인
+    log_memory_usage(log, "리랭킹 모델 로드 전")
+
+    # 리랭킹 모델을 평가 시작 직전에 초기화 (메모리 효율성을 위해)
+    reranker_tokenizer, reranker_model, reranker_aux = initialize_reranker(cfg)
+
+    # 리랭킹 모델 로드 후 메모리 사용량 확인
+    log_memory_usage(log, "리랭킹 모델 로드 후")
+
     general_questions = []  # 일반질문 eval_id, answer 저장 리스트
     general_eval_ids = []   # eval_id만 저장 리스트
     with open(eval_filename) as f, open(output_filename, "w") as of:
@@ -510,9 +552,6 @@ def main(cfg: DictConfig) -> None:
     solar_model = UpstageEmbeddings(model=cfg.retrieve.dense_upstage.model_name) if upstage_enabled else None
     sbert_model = SentenceTransformer(cfg.retrieve.dense_sbert.model_name) if sbert_enabled else None
 
-    # 공식 사용법 기반 Reranker 초기화
-    reranker_tokenizer, reranker_model, reranker_aux = initialize_reranker(cfg)
-
     # Elasticsearch 인덱스 설정
     # Elasticsearch 9.x에서는 Nori의 품사 태그가 세분화되어
     # 기존의 "E", "J" 등의 대분류 태그가 허용되지 않습니다.
@@ -549,64 +588,99 @@ def main(cfg: DictConfig) -> None:
         }
     }
 
+    # 활성화된 dense retrieve 방식에 따라 매핑 동적 생성
     mappings = {
         "properties": {
-            "content": {"type": "text", "analyzer": "nori"},
-            # 백엔드별 임베딩 필드 (둘 다 768차원)
-            "embeddings_upstage": {
-                "type": "dense_vector",
-                "dims": 768,
-                "index": True,
-                "similarity": "l2_norm"
-            },
-            "embeddings_sbert": {
-                "type": "dense_vector",
-                "dims": 768,
-                "index": True,
-                "similarity": "l2_norm"
-            }
+            "content": {"type": "text", "analyzer": "nori"}
         }
     }
 
-    # 인덱스 생성
-    create_es_index(es, cfg.index.name, settings, mappings)
+    # Upstage 임베딩이 활성화된 경우에만 필드 추가
+    if upstage_enabled:
+        mappings["properties"]["embeddings_upstage"] = {
+            "type": "dense_vector",
+            "dims": 4096,
+            "index": True,
+            "similarity": "l2_norm"
+        }
 
-    # 문서 임베딩 생성 및 인덱싱
-    index_docs = []
-    with open(cfg.paths.documents) as f:
-        docs = [json.loads(line) for line in f]
+    # SBERT 임베딩이 활성화된 경우에만 필드 추가
+    if sbert_enabled:
+        mappings["properties"]["embeddings_sbert"] = {
+            "type": "dense_vector",
+            "dims": 768,
+            "index": True,
+            "similarity": "l2_norm"
+        }
 
-    # Upstage(4096→PCA 768)
-    pca = None
-    solar_reduced = None
-    if upstage_enabled and solar_model is not None:
-        solar_embeds = get_embeddings_in_batches(docs, solar_model, cfg.embedding.batch_size)
-        pca = PCA(n_components=768)
-        solar_reduced = pca.fit_transform(solar_embeds)
+    # 인덱스 생성 또는 재사용
+    force_recreate = getattr(cfg.index, 'force_recreate', True)
+    index_exists = es.indices.exists(index=cfg.index.name)
+    create_es_index(es, cfg.index.name, settings, mappings, force_recreate)
 
-    # SBERT(768)
-    sbert_embeds = None
-    if sbert_enabled and sbert_model is not None:
-        sbert_embeds = []
-        bs = cfg.embedding.batch_size
-        for i in range(0, len(docs), bs):
-            batch = docs[i:i+bs]
-            contents = [d["content"] for d in batch]
-            sbert_embeds.extend(sbert_get_embedding(contents, sbert_model))
+    # 인덱스가 이미 존재하고 force_recreate가 False면 임베딩 및 색인 건너뛰기
+    if index_exists and not force_recreate:
+        log.info(f'기존 인덱스 "{cfg.index.name}" 재사용 - 임베딩 및 색인 과정 건너뜀')
+    else:
+        # 문서 임베딩 생성 및 인덱싱
+        index_docs = []
+        with open(cfg.paths.documents) as f:
+            docs = [json.loads(line) for line in f]
 
-    # 문서에 필요한 필드만 추가하여 색인
-    for idx, doc in enumerate(docs):
-        if solar_reduced is not None:
-            doc["embeddings_upstage"] = solar_reduced[idx].tolist()
-        if sbert_embeds is not None:
-            vec = sbert_embeds[idx]
-            if hasattr(vec, 'tolist'):
-                vec = vec.tolist()
-            doc["embeddings_sbert"] = vec
-        index_docs.append(doc)
+        # Upstage(4096 차원 그대로 사용)
+        solar_embeds = None
+        if upstage_enabled and solar_model is not None:
+            solar_embeds = get_embeddings_in_batches(docs, solar_model, cfg.embedding.batch_size)
 
-    ret = bulk_add(es, cfg.index.name, index_docs)
-    log.info(f'Bulk indexing completed: {ret}')
+        # SBERT(768)
+        sbert_embeds = None
+        if sbert_enabled and sbert_model is not None:
+            sbert_embeds = []
+            bs = cfg.embedding.batch_size
+            for i in range(0, len(docs), bs):
+                batch = docs[i:i+bs]
+                contents = [d["content"] for d in batch]
+                sbert_embeds.extend(sbert_get_embedding(contents, sbert_model))
+
+        # 문서에 필요한 필드만 추가하여 색인
+        for idx, doc in enumerate(docs):
+            if solar_embeds is not None:
+                vec = solar_embeds[idx]
+                if hasattr(vec, 'tolist'):
+                    vec = vec.tolist()
+                doc["embeddings_upstage"] = vec
+            if sbert_embeds is not None:
+                vec = sbert_embeds[idx]
+                if hasattr(vec, 'tolist'):
+                    vec = vec.tolist()
+                doc["embeddings_sbert"] = vec
+            index_docs.append(doc)
+
+        ret = bulk_add(es, cfg.index.name, index_docs)
+        log.info(f'Bulk indexing completed: {ret}')
+
+        # 색인 완료 후 불필요한 대용량 메모리 해제 (리랭킹 모델 로드 전 OOM 방지)
+        import gc
+        log.info('색인 완료 - 불필요한 메모리 해제 시작')
+
+        # 대용량 변수들 메모리 해제
+        if 'solar_embeds' in locals() and solar_embeds is not None:
+            del solar_embeds
+        if 'sbert_embeds' in locals() and sbert_embeds is not None:
+            del sbert_embeds
+        if 'index_docs' in locals():
+            del index_docs
+        if 'docs' in locals():
+            del docs
+
+        # 가비지 컬렉션 실행
+        gc.collect()
+
+        # GPU 메모리 캐시 정리 (PyTorch 사용 시)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        log.info('메모리 해제 완료 - 리랭킹 모델 로드 준비')
 
     # 평가 데이터에 대해서 결과 생성
     # CSV 파일을 Hydra outputs 디렉토리에 저장
@@ -618,10 +692,10 @@ def main(cfg: DictConfig) -> None:
     log.info(f'Hydra output directory: {hydra_output_dir}')
     log.info(f'Starting evaluation with output file: {output_path}')
     dense_ctx = {
-        'upstage': {'model': solar_model, 'pca': pca} if upstage_enabled and solar_model is not None else None,
+        'upstage': {'model': solar_model} if upstage_enabled and solar_model is not None else None,
         'sbert': {'model': sbert_model} if sbert_enabled and sbert_model is not None else None,
     }
-    eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name, dense_ctx, reranker_tokenizer, reranker_model, reranker_aux)
+    eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name, dense_ctx)
     log.info('RAG evaluation process completed')
 
 

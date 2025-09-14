@@ -56,7 +56,7 @@ retrieve:
 
 # 리랭커 설정
 reranker:
-  model_name: "Qwen/Qwen3-Reranker-8B"
+  model_name: "Qwen/Qwen3-Reranker-4B"
   batch_size: 16
   instruction: "Given a web search query, retrieve relevant passages"
   use_reranker: true
@@ -70,6 +70,7 @@ embedding:
 # 인덱스 설정
 index:
   name: "test"
+  force_recreate: true  # false면 기존 인덱스 재사용, true면 삭제 후 재생성
 
 # Elasticsearch 설정
 elasticsearch:
