@@ -19,6 +19,18 @@ else
   tar -xzf "${ES_TARBALL}"
 fi
 
+# Configure JVM heap to 2g via jvm.options.d
+echo "[install] Setting JVM heap size to 2g..."
+MEM_OPTS_DIR="./${ES_DIR}/config/jvm.options.d"
+MEM_OPTS_FILE="${MEM_OPTS_DIR}/memory.options"
+mkdir -p "${MEM_OPTS_DIR}"
+if [ -f "${MEM_OPTS_FILE}" ]; then
+  # Normalize existing Xms/Xmx to 2g
+  sed -i -E 's/^(-Xms)[0-9]+[mMgG]/\12g/; s/^(-Xmx)[0-9]+[mMgG]/\12g/' "${MEM_OPTS_FILE}"
+else
+  printf "# Custom heap settings for memory optimization\n-Xms2g\n-Xmx2g\n" > "${MEM_OPTS_FILE}"
+fi
+
 if id -u daemon >/dev/null 2>&1; then
   echo "[install] Changing ownership to daemon:daemon"
   chown -R daemon:daemon "${ES_DIR}" || true
@@ -47,4 +59,3 @@ else
 fi
 
 echo "[install] Done."
-
