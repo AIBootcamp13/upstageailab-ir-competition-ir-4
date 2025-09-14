@@ -430,8 +430,15 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             documents = retrieve_all(es, index_name)
         else:
             docids = set()
+            # 각 retrieve 방식별 문서 수집 현황 추적을 위한 카운터
+            log = logging.getLogger(__name__)
+            sparse_count = 0
+            upstage_count = 0
+            sbert_count = 0
+            hyde_count = 0
             if sparse_enabled:
                 sparse_result = sparse_retrieve(es, index_name, standalone_query, cfg.retrieve.sparse.top_k)
+                sparse_retrieved = len(sparse_result['hits']['hits'])
                 for rst in sparse_result['hits']['hits']:
                     src = rst.get("_source", {})
                     docid = src.get("docid")
@@ -442,6 +449,8 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                             "docid": docid,
                             "score": rst.get("_score", 0.0)
                         })
+                        sparse_count += 1
+                log.info(f"Sparse retrieve: {sparse_retrieved}개 검색, {sparse_count}개 추가 (중복 {sparse_retrieved - sparse_count}개)")
             # 하이브리드 dense: upstage → sbert 순서로 덧붙임
             if upstage_enabled and dense_ctx and dense_ctx.get('upstage'):
                 du = dense_ctx['upstage']
@@ -449,6 +458,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                     es, du.get('model'), index_name, standalone_query,
                     cfg.retrieve.dense_upstage.top_k, cfg.retrieve.dense_upstage.num_candidates
                 )
+                upstage_retrieved = len(dense_result['hits']['hits'])
                 for rst in dense_result['hits']['hits']:
                     src = rst.get("_source", {})
                     docid = src.get("docid")
@@ -459,12 +469,15 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                             "docid": docid,
                             "score": rst.get("_score", 0.0)
                         })
+                        upstage_count += 1
+                log.info(f"Dense Upstage retrieve: {upstage_retrieved}개 검색, {upstage_count}개 추가 (중복 {upstage_retrieved - upstage_count}개)")
             if sbert_enabled and dense_ctx and dense_ctx.get('sbert'):
                 ds = dense_ctx['sbert']
                 dense_result = dense_retrieve_sbert(
                     es, ds.get('model'), index_name, standalone_query,
                     cfg.retrieve.dense_sbert.top_k, cfg.retrieve.dense_sbert.num_candidates
                 )
+                sbert_retrieved = len(dense_result['hits']['hits'])
                 for rst in dense_result['hits']['hits']:
                     src = rst.get("_source", {})
                     docid = src.get("docid")
@@ -475,6 +488,8 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                             "docid": docid,
                             "score": rst.get("_score", 0.0)
                         })
+                        sbert_count += 1
+                log.info(f"Dense SBERT retrieve: {sbert_retrieved}개 검색, {sbert_count}개 추가 (중복 {sbert_retrieved - sbert_count}개)")
             # HyDE 기법을 활용한 Upstage Dense Retrieve
             if upstage_hyde_enabled and dense_ctx and dense_ctx.get('upstage_hyde'):
                 duh = dense_ctx['upstage_hyde']
@@ -483,6 +498,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                     cfg.retrieve.dense_upstage_hyde.top_k, cfg.retrieve.dense_upstage_hyde.num_candidates,
                     client, cfg
                 )
+                hyde_retrieved = len(dense_result['hits']['hits'])
                 for rst in dense_result['hits']['hits']:
                     src = rst.get("_source", {})
                     docid = src.get("docid")
@@ -493,7 +509,24 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                             "docid": docid,
                             "score": rst.get("_score", 0.0)
                         })
-        
+                        hyde_count += 1
+                log.info(f"Dense Upstage HyDE retrieve: {hyde_retrieved}개 검색, {hyde_count}개 추가 (중복 {hyde_retrieved - hyde_count}개)")
+
+            # 전체 retrieve 요약 로그 출력
+            active_methods = []
+            if sparse_enabled and sparse_count > 0:
+                active_methods.append(f"Sparse({sparse_count})")
+            if upstage_enabled and upstage_count > 0:
+                active_methods.append(f"Upstage({upstage_count})")
+            if sbert_enabled and sbert_count > 0:
+                active_methods.append(f"SBERT({sbert_count})")
+            if upstage_hyde_enabled and hyde_count > 0:
+                active_methods.append(f"HyDE({hyde_count})")
+
+            total_docs = len(documents)
+            summary = " + ".join(active_methods) if active_methods else "없음"
+            log.info(f"📊 Retrieve 요약: {summary} = 총 {total_docs}개 문서")
+
         # Reranker가 활성화된 경우 reranking 수행
         if cfg.reranker.use_reranker and reranker_tokenizer is not None and reranker_model is not None:
             reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg)
