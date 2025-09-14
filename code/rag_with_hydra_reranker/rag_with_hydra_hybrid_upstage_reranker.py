@@ -23,12 +23,15 @@ load_dotenv()
 # Sentence Transformer 모델 - main 함수에서 초기화
 
 
-# UpstageEmbeddings를 이용하여 임베딩 생성
-def get_embedding(sentences, model, is_query=False):
+# Upstage / SBERT 임베딩 유틸
+def upstage_get_embedding(sentences, model, is_query=False):
     if is_query:
         return model.embed_query(sentences[0]) if len(sentences) == 1 else [model.embed_query(q) for q in sentences]
     else:
         return model.embed_documents(sentences)
+
+def sbert_get_embedding(sentences, model):
+    return model.encode(sentences)
 
 
 # 문서 임베딩 배치 생성 (passage embedding)
@@ -38,7 +41,7 @@ def get_embeddings_in_batches(docs, model, batch_size=100):
     for i in range(0, len(docs), batch_size):
         batch = docs[i:i + batch_size]
         contents = [doc["content"] for doc in batch]
-        embeddings = get_embedding(contents, model, is_query=False)
+        embeddings = upstage_get_embedding(contents, model, is_query=False)
         batch_embeddings.extend(embeddings)
         log.info(f'Processing batch {i}')
     return batch_embeddings
@@ -84,23 +87,29 @@ def sparse_retrieve(es, index_name, query_str, size):
     return es.search(index=index_name, query=query, size=size, sort="_score")
 
 
-# Vector 유사도를 이용한 검색 (query embedding)
-def dense_retrieve(es, model, index_name, query_str, size, num_candidates=100, pca=None):
+# Vector 유사도를 이용한 검색 (backend별)
+def dense_retrieve_upstage(es, model, pca, index_name, query_str, size, num_candidates=100):
     # 쿼리 임베딩 (4096차원)
-    query_embedding = get_embedding([query_str], model, is_query=True)
-
+    query_embedding = upstage_get_embedding([query_str], model, is_query=True)
     # PCA 차원 축소 (768차원)
-    if pca is not None:
-        query_embedding_reduced = pca.transform([query_embedding])[0]
-    else:
-        query_embedding_reduced = query_embedding[:768]  # fallback
-
+    query_embedding_reduced = pca.transform([query_embedding])[0] if pca is not None else query_embedding[:768]
     if hasattr(query_embedding_reduced, 'tolist'):
         query_embedding_reduced = query_embedding_reduced.tolist()
-
     knn = {
-        "field": "embeddings",
+        "field": "embeddings_upstage",
         "query_vector": query_embedding_reduced,
+        "k": size,
+        "num_candidates": num_candidates
+    }
+    return es.search(index=index_name, knn=knn)
+
+def dense_retrieve_sbert(es, model, index_name, query_str, size, num_candidates=100):
+    query_embedding = sbert_get_embedding([query_str], model)[0]
+    if hasattr(query_embedding, 'tolist'):
+        query_embedding = query_embedding.tolist()
+    knn = {
+        "field": "embeddings_sbert",
+        "query_vector": query_embedding,
         "k": size,
         "num_candidates": num_candidates
     }
@@ -300,7 +309,7 @@ def get_tools(cfg):
 
 
 # LLM과 검색엔진을 활용한 RAG 구현
-def answer_question(messages, client, cfg, es, index_name, dense_model=None, reranker_tokenizer=None, reranker_model=None, reranker_aux=None):
+def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reranker_tokenizer=None, reranker_model=None, reranker_aux=None):
     # 함수 출력 초기화
     response = {"standalone_query": "", "topk": [], "references": [], "answer": ""}
 
@@ -330,17 +339,18 @@ def answer_question(messages, client, cfg, es, index_name, dense_model=None, rer
         # 설정 토글에 따른 검색 동작 분기
         response["standalone_query"] = standalone_query
 
-        sparse_enabled = getattr(cfg.search.sparse, 'enabled', True)
-        dense_enabled = getattr(cfg.search.dense, 'enabled', True)
+        sparse_enabled = getattr(cfg.retrieve.sparse, 'enabled', True)
+        upstage_enabled = getattr(cfg.retrieve.dense_upstage, 'enabled', False)
+        sbert_enabled = getattr(cfg.retrieve.dense_sbert, 'enabled', False)
 
         documents = []
-        if not sparse_enabled and not dense_enabled:
+        if not sparse_enabled and not upstage_enabled and not sbert_enabled:
             # 리트리브 비활성화: 전체 문서를 리랭킹 대상으로 사용
             documents = retrieve_all(es, index_name)
         else:
             docids = set()
             if sparse_enabled:
-                sparse_result = sparse_retrieve(es, index_name, standalone_query, cfg.search.sparse.top_k)
+                sparse_result = sparse_retrieve(es, index_name, standalone_query, cfg.retrieve.sparse.top_k)
                 for rst in sparse_result['hits']['hits']:
                     src = rst.get("_source", {})
                     docid = src.get("docid")
@@ -351,8 +361,29 @@ def answer_question(messages, client, cfg, es, index_name, dense_model=None, rer
                             "docid": docid,
                             "score": rst.get("_score", 0.0)
                         })
-            if dense_enabled:
-                dense_result = dense_retrieve(es, dense_model, index_name, standalone_query, cfg.search.dense.top_k, cfg.search.dense.num_candidates)
+            # 하이브리드 dense: upstage → sbert 순서로 덧붙임
+            if upstage_enabled and dense_ctx and dense_ctx.get('upstage'):
+                du = dense_ctx['upstage']
+                dense_result = dense_retrieve_upstage(
+                    es, du.get('model'), du.get('pca'), index_name, standalone_query,
+                    cfg.retrieve.dense_upstage.top_k, cfg.retrieve.dense_upstage.num_candidates
+                )
+                for rst in dense_result['hits']['hits']:
+                    src = rst.get("_source", {})
+                    docid = src.get("docid")
+                    if docid and docid not in docids:
+                        docids.add(docid)
+                        documents.append({
+                            "content": src.get("content", ""),
+                            "docid": docid,
+                            "score": rst.get("_score", 0.0)
+                        })
+            if sbert_enabled and dense_ctx and dense_ctx.get('sbert'):
+                ds = dense_ctx['sbert']
+                dense_result = dense_retrieve_sbert(
+                    es, ds.get('model'), index_name, standalone_query,
+                    cfg.retrieve.dense_sbert.top_k, cfg.retrieve.dense_sbert.num_candidates
+                )
                 for rst in dense_result['hits']['hits']:
                     src = rst.get("_source", {})
                     docid = src.get("docid")
@@ -407,7 +438,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_model=None, rer
 
 
 # 평가를 위한 파일을 읽어서 각 평가 데이터에 대해서 결과 추출후 파일에 저장
-def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, dense_model=None, reranker_tokenizer=None, reranker_model=None, reranker_aux=None):
+def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, dense_ctx=None, reranker_tokenizer=None, reranker_model=None, reranker_aux=None):
     log = logging.getLogger(__name__)
     general_questions = []  # 일반질문 eval_id, answer 저장 리스트
     general_eval_ids = []   # eval_id만 저장 리스트
@@ -416,7 +447,7 @@ def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, dense_
         for line in f:
             j = json.loads(line)
             log.info(f'🚩Test {idx} - Question: {j["msg"]}')
-            response = answer_question(j["msg"], client, cfg, es, index_name, dense_model, reranker_tokenizer, reranker_model, reranker_aux)
+            response = answer_question(j["msg"], client, cfg, es, index_name, dense_ctx, reranker_tokenizer, reranker_model, reranker_aux)
             log.info(f'Answer: {response["answer"]}')
             log.info(f'Retrieved {"👆일반질문👆" if len(response["topk"]) == 0 else len(response["topk"])} documents: {response["topk"]}')
             log.debug(f'References: {len(response["references"])} items')
@@ -471,11 +502,13 @@ def main(cfg: DictConfig) -> None:
     )
     log.info(f'Elasticsearch connection established: {es.info()}')
 
-    # Sentence Transformer 모델 초기화 (backward compatibility) - 현재는 사용하지 않음
-    # model = SentenceTransformer(cfg.embedding.model_name)
+    # Retrieve 백엔드 활성화 여부
+    upstage_enabled = getattr(cfg.retrieve.dense_upstage, 'enabled', False)
+    sbert_enabled = getattr(cfg.retrieve.dense_sbert, 'enabled', False)
 
-    # Upstage solar embedding 모델 초기화 (4096차원)
-    solar_model = UpstageEmbeddings(model="solar-embedding-1-large")
+    # 백엔드별 모델 초기화 (활성화된 경우에만)
+    solar_model = UpstageEmbeddings(model=cfg.retrieve.dense_upstage.model_name) if upstage_enabled else None
+    sbert_model = SentenceTransformer(cfg.retrieve.dense_sbert.model_name) if sbert_enabled else None
 
     # 공식 사용법 기반 Reranker 초기화
     reranker_tokenizer, reranker_model, reranker_aux = initialize_reranker(cfg)
@@ -503,7 +536,14 @@ def main(cfg: DictConfig) -> None:
     mappings = {
         "properties": {
             "content": {"type": "text", "analyzer": "nori"},
-            "embeddings": {
+            # 백엔드별 임베딩 필드 (둘 다 768차원)
+            "embeddings_upstage": {
+                "type": "dense_vector",
+                "dims": 768,
+                "index": True,
+                "similarity": "l2_norm"
+            },
+            "embeddings_sbert": {
                 "type": "dense_vector",
                 "dims": 768,
                 "index": True,
@@ -515,24 +555,40 @@ def main(cfg: DictConfig) -> None:
     # 인덱스 생성
     create_es_index(es, cfg.index.name, settings, mappings)
 
-    # 문서 임베딩 생성 및 인덱싱 (solar: 4096차원, ES: 768차원)
+    # 문서 임베딩 생성 및 인덱싱
     index_docs = []
     with open(cfg.paths.documents) as f:
         docs = [json.loads(line) for line in f]
 
-    # solar embedding 전체 생성
-    solar_embeds = get_embeddings_in_batches(docs, solar_model, cfg.embedding.batch_size)
-    
-    # PCA 학습 (4096 -> 768)
-    pca = PCA(n_components=768)
-    solar_embeds_reduced = pca.fit_transform(solar_embeds)
-    
-    # 문서에 축소된 임베딩 저장
-    for doc, reduced_embed in zip(docs, solar_embeds_reduced):
-        doc["embeddings"] = reduced_embed.tolist()
+    # Upstage(4096→PCA 768)
+    pca = None
+    solar_reduced = None
+    if upstage_enabled and solar_model is not None:
+        solar_embeds = get_embeddings_in_batches(docs, solar_model, cfg.embedding.batch_size)
+        pca = PCA(n_components=768)
+        solar_reduced = pca.fit_transform(solar_embeds)
+
+    # SBERT(768)
+    sbert_embeds = None
+    if sbert_enabled and sbert_model is not None:
+        sbert_embeds = []
+        bs = cfg.embedding.batch_size
+        for i in range(0, len(docs), bs):
+            batch = docs[i:i+bs]
+            contents = [d["content"] for d in batch]
+            sbert_embeds.extend(sbert_get_embedding(contents, sbert_model))
+
+    # 문서에 필요한 필드만 추가하여 색인
+    for idx, doc in enumerate(docs):
+        if solar_reduced is not None:
+            doc["embeddings_upstage"] = solar_reduced[idx].tolist()
+        if sbert_embeds is not None:
+            vec = sbert_embeds[idx]
+            if hasattr(vec, 'tolist'):
+                vec = vec.tolist()
+            doc["embeddings_sbert"] = vec
         index_docs.append(doc)
-        
-    # 대량 문서 추가
+
     ret = bulk_add(es, cfg.index.name, index_docs)
     log.info(f'Bulk indexing completed: {ret}')
 
@@ -545,7 +601,11 @@ def main(cfg: DictConfig) -> None:
     log.info(f'Current working directory: {os.getcwd()}')
     log.info(f'Hydra output directory: {hydra_output_dir}')
     log.info(f'Starting evaluation with output file: {output_path}')
-    eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name, solar_model, reranker_tokenizer, reranker_model, reranker_aux)
+    dense_ctx = {
+        'upstage': {'model': solar_model, 'pca': pca} if upstage_enabled and solar_model is not None else None,
+        'sbert': {'model': sbert_model} if sbert_enabled and sbert_model is not None else None,
+    }
+    eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name, dense_ctx, reranker_tokenizer, reranker_model, reranker_aux)
     log.info('RAG evaluation process completed')
 
 
