@@ -106,6 +106,23 @@ def dense_retrieve(es, model, index_name, query_str, size, num_candidates=100, p
     }
     return es.search(index=index_name, knn=knn)
 
+def retrieve_all(es, index_name):
+    """모든 문서를 조회하여 리랭킹 후보로 사용하기 위한 리스트를 반환한다.
+    score는 0.0으로 설정한다.
+    """
+    documents = []
+    # helpers.scan은 전체 문서를 스트리밍으로 순회
+    for hit in helpers.scan(es, index=index_name, query={"query": {"match_all": {}}}):
+        src = hit.get("_source", {})
+        docid = src.get("docid", hit.get("_id"))
+        content = src.get("content", "")
+        documents.append({
+            "content": content,
+            "docid": docid,
+            "score": 0.0
+        })
+    return documents
+
 # 공식 사용법 기반 Qwen3-Reranker-8B 초기화 (CausalLM + yes/no)
 def initialize_reranker(cfg):
     log = logging.getLogger(__name__)
@@ -310,33 +327,42 @@ def answer_question(messages, client, cfg, es, index_name, dense_model=None, rer
         function_args = json.loads(tool_call.function.arguments)
         standalone_query = function_args.get("standalone_query")
 
-        # Hybrid retrieval: sparse + dense
-        sparse_result = sparse_retrieve(es, index_name, standalone_query, cfg.search.sparse.top_k)
-        dense_result = dense_retrieve(es, dense_model, index_name, standalone_query, cfg.search.dense.top_k, cfg.search.dense.num_candidates)
-
+        # 설정 토글에 따른 검색 동작 분기
         response["standalone_query"] = standalone_query
-        
-        # 결과 합치기 (중복 docid 제거)
-        docids = set()
+
+        sparse_enabled = getattr(cfg.search.sparse, 'enabled', True)
+        dense_enabled = getattr(cfg.search.dense, 'enabled', True)
+
         documents = []
-        for rst in sparse_result['hits']['hits']:
-            docid = rst["_source"]["docid"]
-            if docid not in docids:
-                docids.add(docid)
-                documents.append({
-                    "content": rst["_source"]["content"],
-                    "docid": docid,
-                    "score": rst["_score"]
-                })
-        for rst in dense_result['hits']['hits']:
-            docid = rst["_source"]["docid"]
-            if docid not in docids:
-                docids.add(docid)
-                documents.append({
-                    "content": rst["_source"]["content"],
-                    "docid": docid,
-                    "score": rst["_score"]
-                })
+        if not sparse_enabled and not dense_enabled:
+            # 리트리브 비활성화: 전체 문서를 리랭킹 대상으로 사용
+            documents = retrieve_all(es, index_name)
+        else:
+            docids = set()
+            if sparse_enabled:
+                sparse_result = sparse_retrieve(es, index_name, standalone_query, cfg.search.sparse.top_k)
+                for rst in sparse_result['hits']['hits']:
+                    src = rst.get("_source", {})
+                    docid = src.get("docid")
+                    if docid and docid not in docids:
+                        docids.add(docid)
+                        documents.append({
+                            "content": src.get("content", ""),
+                            "docid": docid,
+                            "score": rst.get("_score", 0.0)
+                        })
+            if dense_enabled:
+                dense_result = dense_retrieve(es, dense_model, index_name, standalone_query, cfg.search.dense.top_k, cfg.search.dense.num_candidates)
+                for rst in dense_result['hits']['hits']:
+                    src = rst.get("_source", {})
+                    docid = src.get("docid")
+                    if docid and docid not in docids:
+                        docids.add(docid)
+                        documents.append({
+                            "content": src.get("content", ""),
+                            "docid": docid,
+                            "score": rst.get("_score", 0.0)
+                        })
         
         # Reranker가 활성화된 경우 reranking 수행
         if cfg.reranker.use_reranker and reranker_tokenizer is not None and reranker_model is not None:
@@ -509,22 +535,6 @@ def main(cfg: DictConfig) -> None:
     # 대량 문서 추가
     ret = bulk_add(es, cfg.index.name, index_docs)
     log.info(f'Bulk indexing completed: {ret}')
-
-    # 테스트 쿼리 실행
-    test_query = "금성이 다른 행성들보다 밝게 보이는 이유는 무엇인가요?"
-    log.info(f'Running test query: {test_query}')
-    
-    # 역색인을 사용하는 검색 예제
-    search_result_retrieve = sparse_retrieve(es, cfg.index.name, test_query, cfg.search.sparse.top_k)
-    log.info('Sparse retrieval results:')
-    for rst in search_result_retrieve['hits']['hits']:
-        log.info(f'Score: {rst["_score"]:.4f}, Content: {rst["_source"]["content"][:100]}...')
-
-    # Vector 유사도 사용한 검색 예제
-    search_result_retrieve = dense_retrieve(es, solar_model, cfg.index.name, test_query, cfg.search.dense.top_k, cfg.search.dense.num_candidates)
-    log.info('Dense retrieval results:')
-    for rst in search_result_retrieve['hits']['hits']:
-        log.info(f'Score: {rst["_score"]:.4f}, Content: {rst["_source"]["content"][:100]}...')
 
     # 평가 데이터에 대해서 결과 생성
     # CSV 파일을 Hydra outputs 디렉토리에 저장

@@ -41,8 +41,10 @@ prompts:
 # 검색 설정
 search:
   sparse:
+    enabled: true   # sparse retrieve 활성화 여부
     top_k: 100      # sparse_retrieve에서 가져올 문서 수
   dense:
+    enabled: true   # dense retrieve 활성화 여부
     top_k: 100      # dense_retrieve에서 가져올 문서 수  
     num_candidates: 100  # KNN 후보 수
 
