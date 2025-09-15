@@ -168,10 +168,19 @@ def dense_retrieve_sbert(es, model, index_name, query_str, size, num_candidates=
     }
     return es.search(index=index_name, knn=knn)
 
+# HyDE 캐시 (간단한 메모리 캐시)
+_hyde_cache = {}
+
 # HyDE 기법: 가상 문서 생성 함수 (범용)
 def generate_hypothetical_document(query, client, cfg):
     """질의에 대해 LLM을 사용하여 가상의 답변 문서를 생성 (OpenAI/Gemini 호환)"""
     log = logging.getLogger(__name__)
+
+    # 캐시 확인
+    cache_key = f"{query}_{getattr(cfg.prompts, 'hyde', '')}"
+    if cache_key in _hyde_cache:
+        log.debug(f"HyDE 캐시에서 문서 반환: {query[:50]}...")
+        return _hyde_cache[cache_key]
     try:
         # 통합된 hyde 프롬프트 사용
         hyde_prompt = getattr(cfg.prompts, 'hyde', '다음 질문에 대해 전문적이고 상세한 설명 문서를 작성해주세요.')
@@ -197,7 +206,10 @@ def generate_hypothetical_document(query, client, cfg):
 
         # 설정에 따라 생성된 문서 출력
         if getattr(cfg.logging, 'show_hyde_generated_document', False):
-            log.info(f"HyDE 생성 문서 (질의: {query[:30]}...):\n{hypothetical_doc}")
+            log.info(f"Dense Retrieval HyDE 생성 문서 (질의: {query[:30]}...):\n{hypothetical_doc}")
+
+        # 캐시에 저장
+        _hyde_cache[cache_key] = hypothetical_doc
 
         return hypothetical_doc
 
@@ -357,8 +369,6 @@ def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reran
         if use_hyde and client is not None:
             log.info("Reranker HyDE 기법 활성화 - 가상 문서 생성 중...")
             rerank_query = generate_hypothetical_document(query, client, cfg)
-            if getattr(cfg.logging, 'show_hyde_generated_document', False):
-                log.info(f"Reranker HyDE 생성 문서: {rerank_query[:100]}...")
         elif use_hyde and client is None:
             log.warning("Reranker HyDE 활성화되었으나 client가 없어 원본 쿼리 사용")
 
@@ -616,6 +626,9 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
     # 함수 출력 초기화
     response = {"standalone_query": "", "topk": [], "references": [], "answer": ""}
 
+    # 로거 초기화
+    log = logging.getLogger(__name__)
+
     # 질의 분석 및 검색 이외의 질의 대응을 위한 LLM 활용
     msg = [{"role": "system", "content": cfg.prompts.function_calling}] + messages
     try:
@@ -649,6 +662,9 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             function_args = json.loads(tool_call.function.arguments)
         standalone_query = function_args.get("standalone_query")
 
+        # Standalone query 로깅
+        log.info(f"검색 쿼리 생성 완료: '{standalone_query}'")
+
         # 설정 토글에 따른 검색 동작 분기
         response["standalone_query"] = standalone_query
 
@@ -666,28 +682,38 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
         else:
             docids = set()
             # 각 retrieve 방식별 문서 수집 현황 추적을 위한 카운터
-            log = logging.getLogger(__name__)
             sparse_count = 0
             upstage_count = 0
             sbert_count = 0
             hyde_count = 0
             gemini_count = 0
             gemini_hyde_count = 0
+
+            # 각 retrieve 방식별 DocID 수집을 위한 리스트
+            sparse_docids = []
+            upstage_docids = []
+            sbert_docids = []
+            hyde_docids = []
+            gemini_docids = []
+            gemini_hyde_docids = []
             if sparse_enabled:
                 sparse_result = sparse_retrieve(es, index_name, standalone_query, cfg.retrieve.sparse.top_k)
                 sparse_retrieved = len(sparse_result['hits']['hits'])
                 for rst in sparse_result['hits']['hits']:
                     src = rst.get("_source", {})
                     docid = src.get("docid")
-                    if docid and docid not in docids:
-                        docids.add(docid)
-                        documents.append({
-                            "content": src.get("content", ""),
-                            "docid": docid,
-                            "score": rst.get("_score", 0.0)
-                        })
-                        sparse_count += 1
-                log.info(f"Sparse retrieve: {sparse_retrieved}개 검색, {sparse_count}개 추가 (중복 {sparse_retrieved - sparse_count}개)")
+                    if docid:
+                        sparse_docids.append(docid)  # 가져온 모든 docid 수집
+                        if docid not in docids:
+                            docids.add(docid)
+                            documents.append({
+                                "content": src.get("content", ""),
+                                "docid": docid,
+                                "score": rst.get("_score", 0.0)
+                            })
+                            sparse_count += 1
+                docid_info = f" - DocIDs: {sparse_docids}" if getattr(cfg.logging, 'show_retrieved_docids', False) else ""
+                log.info(f"Sparse retrieve: {sparse_retrieved}개 검색, {sparse_count}개 추가 (중복 {sparse_retrieved - sparse_count}개){docid_info}")
             # 하이브리드 dense: upstage → sbert 순서로 덧붙임
             if upstage_enabled and dense_ctx and dense_ctx.get('upstage'):
                 du = dense_ctx['upstage']
@@ -699,15 +725,18 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                 for rst in dense_result['hits']['hits']:
                     src = rst.get("_source", {})
                     docid = src.get("docid")
-                    if docid and docid not in docids:
-                        docids.add(docid)
-                        documents.append({
-                            "content": src.get("content", ""),
-                            "docid": docid,
-                            "score": rst.get("_score", 0.0)
-                        })
-                        upstage_count += 1
-                log.info(f"Dense Upstage retrieve: {upstage_retrieved}개 검색, {upstage_count}개 추가 (중복 {upstage_retrieved - upstage_count}개)")
+                    if docid:
+                        upstage_docids.append(docid)  # 가져온 모든 docid 수집
+                        if docid not in docids:
+                            docids.add(docid)
+                            documents.append({
+                                "content": src.get("content", ""),
+                                "docid": docid,
+                                "score": rst.get("_score", 0.0)
+                            })
+                            upstage_count += 1
+                docid_info = f" - DocIDs: {upstage_docids}" if getattr(cfg.logging, 'show_retrieved_docids', False) else ""
+                log.info(f"Dense Upstage retrieve: {upstage_retrieved}개 검색, {upstage_count}개 추가 (중복 {upstage_retrieved - upstage_count}개){docid_info}")
             if sbert_enabled and dense_ctx and dense_ctx.get('sbert'):
                 ds = dense_ctx['sbert']
                 dense_result = dense_retrieve_sbert(
@@ -718,15 +747,18 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                 for rst in dense_result['hits']['hits']:
                     src = rst.get("_source", {})
                     docid = src.get("docid")
-                    if docid and docid not in docids:
-                        docids.add(docid)
-                        documents.append({
-                            "content": src.get("content", ""),
-                            "docid": docid,
-                            "score": rst.get("_score", 0.0)
-                        })
-                        sbert_count += 1
-                log.info(f"Dense SBERT retrieve: {sbert_retrieved}개 검색, {sbert_count}개 추가 (중복 {sbert_retrieved - sbert_count}개)")
+                    if docid:
+                        sbert_docids.append(docid)  # 가져온 모든 docid 수집
+                        if docid not in docids:
+                            docids.add(docid)
+                            documents.append({
+                                "content": src.get("content", ""),
+                                "docid": docid,
+                                "score": rst.get("_score", 0.0)
+                            })
+                            sbert_count += 1
+                docid_info = f" - DocIDs: {sbert_docids}" if getattr(cfg.logging, 'show_retrieved_docids', False) else ""
+                log.info(f"Dense SBERT retrieve: {sbert_retrieved}개 검색, {sbert_count}개 추가 (중복 {sbert_retrieved - sbert_count}개){docid_info}")
             # HyDE 기법을 활용한 Upstage Dense Retrieve
             if upstage_hyde_enabled and dense_ctx and dense_ctx.get('upstage_hyde'):
                 duh = dense_ctx['upstage_hyde']
@@ -739,15 +771,18 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                 for rst in dense_result['hits']['hits']:
                     src = rst.get("_source", {})
                     docid = src.get("docid")
-                    if docid and docid not in docids:
-                        docids.add(docid)
-                        documents.append({
-                            "content": src.get("content", ""),
-                            "docid": docid,
-                            "score": rst.get("_score", 0.0)
-                        })
-                        hyde_count += 1
-                log.info(f"Dense Upstage HyDE retrieve: {hyde_retrieved}개 검색, {hyde_count}개 추가 (중복 {hyde_retrieved - hyde_count}개)")
+                    if docid:
+                        hyde_docids.append(docid)  # 가져온 모든 docid 수집
+                        if docid not in docids:
+                            docids.add(docid)
+                            documents.append({
+                                "content": src.get("content", ""),
+                                "docid": docid,
+                                "score": rst.get("_score", 0.0)
+                            })
+                            hyde_count += 1
+                docid_info = f" - DocIDs: {hyde_docids}" if getattr(cfg.logging, 'show_retrieved_docids', False) else ""
+                log.info(f"Dense Upstage HyDE retrieve: {hyde_retrieved}개 검색, {hyde_count}개 추가 (중복 {hyde_retrieved - hyde_count}개){docid_info}")
 
             # Gemini Dense Retrieve
             if gemini_enabled and dense_ctx and dense_ctx.get('gemini'):
@@ -760,15 +795,18 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                 for rst in dense_result['hits']['hits']:
                     src = rst.get("_source", {})
                     docid = src.get("docid")
-                    if docid and docid not in docids:
-                        docids.add(docid)
-                        documents.append({
-                            "content": src.get("content", ""),
-                            "docid": docid,
-                            "score": rst.get("_score", 0.0)
-                        })
-                        gemini_count += 1
-                log.info(f"Dense Gemini retrieve: {gemini_retrieved}개 검색, {gemini_count}개 추가 (중복 {gemini_retrieved - gemini_count}개)")
+                    if docid:
+                        gemini_docids.append(docid)  # 가져온 모든 docid 수집
+                        if docid not in docids:
+                            docids.add(docid)
+                            documents.append({
+                                "content": src.get("content", ""),
+                                "docid": docid,
+                                "score": rst.get("_score", 0.0)
+                            })
+                            gemini_count += 1
+                docid_info = f" - DocIDs: {gemini_docids}" if getattr(cfg.logging, 'show_retrieved_docids', False) else ""
+                log.info(f"Dense Gemini retrieve: {gemini_retrieved}개 검색, {gemini_count}개 추가 (중복 {gemini_retrieved - gemini_count}개){docid_info}")
 
             # HyDE 기법을 활용한 Gemini Dense Retrieve
             if gemini_hyde_enabled and dense_ctx and dense_ctx.get('gemini_hyde'):
@@ -782,15 +820,18 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                 for rst in dense_result['hits']['hits']:
                     src = rst.get("_source", {})
                     docid = src.get("docid")
-                    if docid and docid not in docids:
-                        docids.add(docid)
-                        documents.append({
-                            "content": src.get("content", ""),
-                            "docid": docid,
-                            "score": rst.get("_score", 0.0)
-                        })
-                        gemini_hyde_count += 1
-                log.info(f"Dense Gemini HyDE retrieve: {gemini_hyde_retrieved}개 검색, {gemini_hyde_count}개 추가 (중복 {gemini_hyde_retrieved - gemini_hyde_count}개)")
+                    if docid:
+                        gemini_hyde_docids.append(docid)  # 가져온 모든 docid 수집
+                        if docid not in docids:
+                            docids.add(docid)
+                            documents.append({
+                                "content": src.get("content", ""),
+                                "docid": docid,
+                                "score": rst.get("_score", 0.0)
+                            })
+                            gemini_hyde_count += 1
+                docid_info = f" - DocIDs: {gemini_hyde_docids}" if getattr(cfg.logging, 'show_retrieved_docids', False) else ""
+                log.info(f"Dense Gemini HyDE retrieve: {gemini_hyde_retrieved}개 검색, {gemini_hyde_count}개 추가 (중복 {gemini_hyde_retrieved - gemini_hyde_count}개){docid_info}")
 
             # 전체 retrieve 요약 로그 출력
             active_methods = []

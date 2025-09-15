@@ -92,6 +92,7 @@ embedding:
 # 로깅 설정
 logging:
   show_hyde_generated_document: true  # HyDE로 생성된 가상 문서 출력 여부
+  show_retrieved_docids: true  # 각 리트리브 방식별 가져온 docid 리스트 출력 여부
 
 # 인덱스 설정
 index:
