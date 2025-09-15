@@ -119,6 +119,17 @@ def delete_es_index(es, index):
 
 # Elasticsearch 헬퍼 함수를 사용하여 대량 인덱싱 수행
 def bulk_add(es, index, docs):
+    """
+    대량 인덱싱을 수행 (타임아웃 설정 포함)
+
+    Args:
+        es: Elasticsearch 클라이언트
+        index: 인덱스 이름
+        docs: 인덱싱할 문서 리스트
+
+    Returns:
+        (성공한 문서 수, 실패한 문서 수)
+    """
     # 대량 인덱싱 작업을 준비
     actions = [
         {
@@ -127,7 +138,15 @@ def bulk_add(es, index, docs):
         }
         for doc in docs
     ]
-    return helpers.bulk(es, actions)
+
+    return helpers.bulk(
+        es,
+        actions,
+        request_timeout=120,  # 120초 타임아웃
+        max_retries=3,        # 최대 3번 재시도
+        initial_backoff=2,    # 2초 초기 백오프
+        max_backoff=60        # 최대 60초 백오프
+    )
 
 
 # 역색인을 이용한 검색
