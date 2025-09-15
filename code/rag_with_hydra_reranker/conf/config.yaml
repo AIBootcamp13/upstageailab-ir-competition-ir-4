@@ -1,6 +1,9 @@
 # 모델 설정
 model:
-  name: "solar-pro2"
+  name: "solar-pro2"  # solar-pro2 또는 gemini-2.5-flash 등 사용 가능
+  delay_seconds: 0  # Gemini rate limit 회피를 위한 각 호출 전 대기 시간 (초)
+  # name: "gemini-2.5-flash"  # solar-pro2 또는 gemini-2.5-flash 등 사용 가능
+  # delay_seconds: 7  # Gemini rate limit 회피를 위한 각 호출 전 대기 시간 (초)
   temperature: 0
   seed: 1
   timeout: 1000
@@ -37,39 +40,58 @@ prompts:
     - search api를 호출할 때는 반드시 질문에 대한 최종 korean query를 생성해서 호출해야 한다.
 
   standalone_query_description: "Final korean query suitable for use in search from the user messages history."
+
+  hyde: "다음 질문에 대해 전문적이고 사실과 정확한 정보를 바탕으로 핵심 정보가 포함된 요약 답변을 작성해줘."
   
 # 리트리브 설정
 retrieve:
   sparse:
     enabled: true   # sparse retrieve 활성화 여부
-    top_k: 30       # sparse_retrieve에서 가져올 문서 수
+    top_k: 40       # sparse_retrieve에서 가져올 문서 수
   dense_upstage:
-    enabled: true   # Upstage 임베딩 기반 dense 활성화 여부
+    enabled: false   # Upstage 임베딩 기반 dense 활성화 여부
     model_name: "solar-embedding-1-large"
-    top_k: 30       # dense_retrieve_upstage에서 가져올 문서 수
+    top_k: 40       # dense_retrieve_upstage에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
   dense_sbert:
-    enabled: true   # SBERT 임베딩 기반 dense 활성화 여부
+    enabled: false   # SBERT 임베딩 기반 dense 활성화 여부
     model_name: "snunlp/KR-SBERT-V40K-klueNLI-augSTS"
-    top_k: 30       # dense_retrieve_sbert에서 가져올 문서 수
+    top_k: 40       # dense_retrieve_sbert에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
   dense_upstage_hyde:
     enabled: false  # HyDE 기법을 활용한 Upstage 임베딩 활성화 여부 (dense_upstage와 동일한 모델 사용)
-    top_k: 30       # dense_retrieve_upstage_hyde에서 가져올 문서 수
+    top_k: 40       # dense_retrieve_upstage_hyde에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
-    hyde_prompt: "다음 질문에 대해 전문적이고 상세한 설명 문서를 작성해주세요. 과학적 사실과 정확한 정보를 바탕으로 체계적으로 서술하세요."
+  dense_gemini:
+    enabled: false  # Gemini 임베딩 기반 dense 활성화 여부
+    model_name: "models/gemini-embedding-001"  # Gemini 임베딩 모델 (3072차원)
+    top_k: 40       # dense_retrieve_gemini에서 가져올 문서 수
+    num_candidates: 500  # KNN 후보 수
+    batch_size: 100  # 배치 처리 크기 (rate limit 회피)
+    batch_delay_seconds: 65  # 배치 처리 후 대기 시간 (초)
+  dense_gemini_hyde:
+    enabled: false  # HyDE 기법을 활용한 Gemini 임베딩 활성화 여부
+    top_k: 40       # dense_retrieve_gemini_hyde에서 가져올 문서 수
+    num_candidates: 500  # KNN 후보 수
+    batch_size: 100  # 배치 처리 크기 (rate limit 회피)
+    batch_delay_seconds: 65  # 배치 처리 후 대기 시간 (초)
 
 # 리랭커 설정
 reranker:
+  use_reranker: true
+  use_hyde: false  # HyDE 기법으로 가상 문서 생성하여 리랭킹 여부
   model_name: "Qwen/Qwen3-Reranker-8B"
   batch_size: 4
   instruction: "Given a web search query, retrieve relevant passages"
-  use_reranker: true
   top_k: 3        # 리랭킹 후 최종 선택할 문서 수
   
 # 임베딩 배치 설정 (모델명은 각 retrieve 섹션에 정의)
 embedding:
   batch_size: 100
+
+# 로깅 설정
+logging:
+  show_hyde_generated_document: true  # HyDE로 생성된 가상 문서 출력 여부
 
 # 인덱스 설정
 index:

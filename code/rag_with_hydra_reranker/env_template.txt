@@ -13,6 +13,12 @@ OPENAI_API_KEY=sk-your_openai_api_key_here
 # upstage 등 다른 OpenAI 호환 서비스 사용시 설정
 OPENAI_BASE_URL=https://api.upstage.ai/v1
 
+# Upstage API 키
+UPSTAGE_API_KEY=your_openai_api_key_here
+
+# Google API 키
+GOOGLE_API_KEY=your_openai_api_key_here
+
 # 사용 방법:
 # 1. 이 파일을 .env로 복사: cp env_template.txt .env
 # 2. .env 파일을 열어서 실제 값으로 변경

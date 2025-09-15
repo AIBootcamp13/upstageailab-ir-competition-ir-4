@@ -62,6 +62,26 @@ def upstage_get_embedding(sentences, model, is_query=False):
 def sbert_get_embedding(sentences, model):
     return model.encode(sentences)
 
+# Gemini 임베딩 유틸 (단순화됨)
+def gemini_get_embedding(sentences, model, is_query=False):
+    """
+    Gemini 임베딩 생성 (단순화된 버전)
+
+    Args:
+        sentences: 임베딩할 문장 리스트
+        model: GoogleGenerativeAIEmbeddings 모델
+        is_query: 질의용 임베딩인지 여부
+    """
+    if is_query:
+        # 질의는 보통 단일 문장
+        if len(sentences) == 1:
+            return model.embed_query(sentences[0])
+        else:
+            return [model.embed_query(q) for q in sentences]
+    else:
+        # 문서 임베딩 (배치 처리는 상위 함수에서 수행)
+        return model.embed_documents(sentences)
+
 
 # 문서 임베딩 배치 생성 (passage embedding)
 def get_embeddings_in_batches(docs, model, batch_size=100):
@@ -74,6 +94,7 @@ def get_embeddings_in_batches(docs, model, batch_size=100):
         batch_embeddings.extend(embeddings)
         log.info(f'Processing batch {i}')
     return batch_embeddings
+
 
 
 # 새로운 index 생성
@@ -147,29 +168,37 @@ def dense_retrieve_sbert(es, model, index_name, query_str, size, num_candidates=
     }
     return es.search(index=index_name, knn=knn)
 
-# HyDE 기법: 가상 문서 생성 함수
+# HyDE 기법: 가상 문서 생성 함수 (범용)
 def generate_hypothetical_document(query, client, cfg):
-    """질의에 대해 LLM을 사용하여 가상의 답변 문서를 생성"""
+    """질의에 대해 LLM을 사용하여 가상의 답변 문서를 생성 (OpenAI/Gemini 호환)"""
     log = logging.getLogger(__name__)
     try:
-        hyde_prompt = getattr(cfg.retrieve.dense_upstage_hyde, 'hyde_prompt',
-                             '다음 질문에 대해 전문적이고 상세한 설명 문서를 작성해주세요.')
+        # 통합된 hyde 프롬프트 사용
+        hyde_prompt = getattr(cfg.prompts, 'hyde', '다음 질문에 대해 전문적이고 상세한 설명 문서를 작성해주세요.')
 
+        # 통합 LLM 호출 함수 사용
         messages = [
             {"role": "system", "content": hyde_prompt},
             {"role": "user", "content": query}
         ]
 
-        result = client.chat.completions.create(
-            model=cfg.model.name,
+        result = call_llm_unified(
+            client=client,
             messages=messages,
-            temperature=cfg.model.temperature,
-            seed=cfg.model.seed,
-            timeout=cfg.model.timeout
+            cfg=cfg
         )
 
-        hypothetical_doc = result.choices[0].message.content
+        # result 타입에 따라 적절히 처리
+        if isinstance(result, dict):
+            hypothetical_doc = result["choices"][0]["message"]["content"]
+        else:
+            hypothetical_doc = result.choices[0].message.content
         log.debug(f"Generated hypothetical document for query: {query[:50]}...")
+
+        # 설정에 따라 생성된 문서 출력
+        if getattr(cfg.logging, 'show_hyde_generated_document', False):
+            log.info(f"HyDE 생성 문서 (질의: {query[:30]}...):\n{hypothetical_doc}")
+
         return hypothetical_doc
 
     except Exception as e:
@@ -189,6 +218,39 @@ def dense_retrieve_upstage_hyde(es, model, index_name, query_str, size, num_cand
         query_embedding = query_embedding.tolist()
     knn = {
         "field": "embeddings_upstage",
+        "query_vector": query_embedding,
+        "k": size,
+        "num_candidates": num_candidates
+    }
+    return es.search(index=index_name, knn=knn)
+
+# Gemini Vector 유사도를 이용한 검색
+def dense_retrieve_gemini(es, model, index_name, query_str, size, num_candidates=100):
+    """Gemini 임베딩을 사용한 dense retrieve"""
+    # 쿼리 임베딩 (3072차원)
+    query_embedding = gemini_get_embedding([query_str], model, is_query=True)
+    if hasattr(query_embedding, 'tolist'):
+        query_embedding = query_embedding.tolist()
+    knn = {
+        "field": "embeddings_gemini",
+        "query_vector": query_embedding,
+        "k": size,
+        "num_candidates": num_candidates
+    }
+    return es.search(index=index_name, knn=knn)
+
+# HyDE 기법을 활용한 Gemini Dense Retrieve
+def dense_retrieve_gemini_hyde(es, model, index_name, query_str, size, num_candidates, client, cfg):
+    """HyDE 기법: 질의 -> 가상문서 생성 -> Gemini 임베딩 -> 검색"""
+    # 1단계: 가상 문서 생성
+    hypothetical_doc = generate_hypothetical_document(query_str, client, cfg)
+
+    # 2단계: 가상 문서를 Gemini 임베딩하여 검색
+    query_embedding = gemini_get_embedding([hypothetical_doc], model, is_query=True)
+    if hasattr(query_embedding, 'tolist'):
+        query_embedding = query_embedding.tolist()
+    knn = {
+        "field": "embeddings_gemini",
         "query_vector": query_embedding,
         "k": size,
         "num_candidates": num_candidates
@@ -276,7 +338,7 @@ def _format_instruction(instruction, query, doc):
 
 
 # 공식 사용법 기반 reranking (배치 처리 및 메모리 관리 기능 추가)
-def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg):
+def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg, client=None):
     log = logging.getLogger(__name__)
 
     if reranker_tokenizer is None or reranker_model is None or reranker_aux is None:
@@ -287,6 +349,23 @@ def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reran
         instruction = getattr(cfg.reranker, 'instruction', None)
         # config에서 batch_size를 가져오거나, 없으면 기본값(예: 2)으로 설정
         batch_size = getattr(cfg.reranker, 'batch_size', 2)
+
+        # HyDE 기법 사용 여부 확인
+        use_hyde = getattr(cfg.reranker, 'use_hyde', False)
+        rerank_query = query
+
+        if use_hyde and client is not None:
+            log.info("Reranker HyDE 기법 활성화 - 가상 문서 생성 중...")
+            rerank_query = generate_hypothetical_document(query, client, cfg)
+            if getattr(cfg.logging, 'show_hyde_generated_document', False):
+                log.info(f"Reranker HyDE 생성 문서: {rerank_query[:100]}...")
+        elif use_hyde and client is None:
+            log.warning("Reranker HyDE 활성화되었으나 client가 없어 원본 쿼리 사용")
+
+        log.info(f"Reranking with {'HyDE query' if use_hyde and client else 'original query'}")
+
+        # 실제 쿼리 (원본 또는 HyDE 생성)를 사용하여 리랭킹 수행
+        actual_query = rerank_query
         
         all_scores = []
         device = reranker_aux['device']
@@ -296,8 +375,8 @@ def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reran
             log.info(f"Reranking batch {i // batch_size + 1}...")
             batch_docs = documents[i:i + batch_size]
             
-            # 입력 문자열 생성
-            pairs = [_format_instruction(instruction, query, doc["content"]) for doc in batch_docs]
+            # 입력 문자열 생성 (HyDE 쿼리 또는 원본 쿼리 사용)
+            pairs = [_format_instruction(instruction, actual_query, doc["content"]) for doc in batch_docs]
 
             # 토크나이즈
             max_length = reranker_aux['max_length']
@@ -359,9 +438,153 @@ def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reran
 
 # RAG를 구현하는 코드
 from openai import OpenAI
+from langchain_google_genai import GoogleGenerativeAIEmbeddings  # embedding만 LangChain 사용
+from google import genai
+from google.genai import types
 import traceback
+import time
 
-# OpenAI 설정들은 main 함수에서 초기화
+# OpenAI 및 Gemini 클라이언트 생성 함수
+def create_llm_client(cfg):
+    """설정에 따라 LLM 클라이언트 생성 (OpenAI 또는 Gemini)"""
+    log = logging.getLogger(__name__)
+    model_name = cfg.model.name
+
+    # Gemini 모델인지 확인
+    if "gemini" in model_name.lower():
+        # GOOGLE_API_KEY 또는 GEMINI_API_KEY 지원
+        google_api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not google_api_key:
+            raise ValueError("Gemini 모델을 사용하려면 GEMINI_API_KEY 또는 GOOGLE_API_KEY 환경변수가 필요합니다.")
+
+        log.info(f"Gemini LLM 클라이언트 생성: {model_name}")
+        return genai.Client(api_key=google_api_key)
+    else:
+        # OpenAI 호환 클라이언트 (solar-pro2 등)
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            raise ValueError("OpenAI 호환 모델을 사용하려면 OPENAI_API_KEY가 필요합니다.")
+
+        log.info(f"OpenAI 호환 클라이언트 생성: {model_name}")
+        openai_base_url = os.getenv("OPENAI_BASE_URL")
+        if openai_base_url:
+            return OpenAI(base_url=openai_base_url)
+        else:
+            return OpenAI()
+
+def apply_llm_delay(cfg):
+    """설정된 시간만큼 대기 (rate limit 회피)"""
+    delay_seconds = getattr(cfg.model, 'delay_seconds', 0)
+    if delay_seconds > 0:
+        log = logging.getLogger(__name__)
+        log.debug(f"LLM 호출 대기: {delay_seconds}초")
+        time.sleep(delay_seconds)
+
+def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
+    """OpenAI/Gemini 통합 LLM 호출 함수"""
+    log = logging.getLogger(__name__)
+    model_name = cfg.model.name
+
+    # rate limit 회피를 위한 대기
+    apply_llm_delay(cfg)
+
+    # Gemini 클라이언트인지 확인 (더 정확한 타입 체크)
+    if isinstance(client, genai.Client):  # genai.Client
+        # OpenAI 메시지 형식을 Gemini types.Content 형식으로 변환
+        contents = []
+        for msg in messages:
+            role = "user" if msg["role"] in ["user", "system"] else "model"
+            # system 메시지는 user로 포함 (Gemini는 system role 없음)
+            content_text = msg["content"]
+            if msg["role"] == "system":
+                content_text = f"System: {content_text}"
+
+            contents.append(types.Content(
+                role=role,
+                parts=[types.Part.from_text(text=content_text)]
+            ))
+
+        # Gemini tool calling 지원
+        gemini_tools = None
+        if tools:
+            gemini_tools = []
+            for tool in tools:
+                if tool["type"] == "function":
+                    func_def = tool["function"]
+                    # Gemini FunctionDeclaration 생성
+                    gemini_func = types.FunctionDeclaration(
+                        name=func_def["name"],
+                        description=func_def["description"],
+                        parameters=func_def["parameters"]
+                    )
+                    gemini_tools.append(types.Tool(function_declarations=[gemini_func]))
+
+        config = types.GenerateContentConfig(
+            temperature=cfg.model.temperature,
+            tools=gemini_tools if gemini_tools else None,
+        )
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=config,
+        )
+
+        # OpenAI 형식으로 응답 변환
+        result = {
+            "choices": [{
+                "message": {
+                    "content": None,
+                    "role": "assistant",
+                    "tool_calls": None
+                }
+            }]
+        }
+
+        # 응답에서 function call 또는 텍스트 추출
+        if response.candidates and len(response.candidates) > 0:
+            candidate = response.candidates[0]
+            if candidate.content and candidate.content.parts:
+                tool_calls = []
+                text_parts = []
+
+                for part in candidate.content.parts:
+                    if hasattr(part, 'function_call') and part.function_call:
+                        # Function call 처리
+                        func_call = part.function_call
+                        tool_calls.append({
+                            "id": f"call_{hash(func_call.name)}",
+                            "type": "function",
+                            "function": {
+                                "name": func_call.name,
+                                "arguments": json.dumps(dict(func_call.args))
+                            }
+                        })
+                    elif hasattr(part, 'text') and part.text:
+                        # 텍스트 응답 처리
+                        text_parts.append(part.text)
+
+                if tool_calls:
+                    result["choices"][0]["message"]["tool_calls"] = tool_calls
+                if text_parts:
+                    result["choices"][0]["message"]["content"] = "".join(text_parts)
+
+        return result
+    else:  # OpenAI 클라이언트
+        params = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": cfg.model.temperature,
+            "seed": cfg.model.seed,
+            "timeout": cfg.model.timeout
+        }
+
+        if tools:
+            params["tools"] = tools
+        if tool_choice:
+            params["tool_choice"] = tool_choice
+
+        return client.chat.completions.create(**params)
 
 # 프롬프트들은 config.yaml에서 관리
 
@@ -396,24 +619,34 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
     # 질의 분석 및 검색 이외의 질의 대응을 위한 LLM 활용
     msg = [{"role": "system", "content": cfg.prompts.function_calling}] + messages
     try:
-        result = client.chat.completions.create(
-            model=cfg.model.name,
+        result = call_llm_unified(
+            client=client,
             messages=msg,
+            cfg=cfg,
             tools=get_tools(cfg),
-            #tool_choice={"type": "function", "function": {"name": "search"}},
-            temperature=cfg.model.temperature,
-            seed=cfg.model.seed,
-            timeout=cfg.model.timeout,
-            reasoning_effort=cfg.model.reasoning_effort
+            #tool_choice={"type": "function", "function": {"name": "search"}}
         )
     except Exception:
         traceback.print_exc()
         return response
 
     # 검색이 필요한 경우 검색 호출후 결과를 활용하여 답변 생성
-    if result.choices[0].message.tool_calls:
-        tool_call = result.choices[0].message.tool_calls[0]
-        function_args = json.loads(tool_call.function.arguments)
+    # result가 딕셔너리인지 객체인지 확인하여 처리
+    if isinstance(result, dict):
+        # 딕셔너리 형태 (Gemini)
+        message = result["choices"][0]["message"]
+        tool_calls = message.get("tool_calls")
+    else:
+        # 객체 형태 (OpenAI)
+        message = result.choices[0].message
+        tool_calls = getattr(message, 'tool_calls', None)
+
+    if tool_calls:
+        tool_call = tool_calls[0]
+        if isinstance(tool_call, dict):
+            function_args = json.loads(tool_call["function"]["arguments"])
+        else:
+            function_args = json.loads(tool_call.function.arguments)
         standalone_query = function_args.get("standalone_query")
 
         # 설정 토글에 따른 검색 동작 분기
@@ -423,9 +656,11 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
         upstage_enabled = getattr(cfg.retrieve.dense_upstage, 'enabled', False)
         sbert_enabled = getattr(cfg.retrieve.dense_sbert, 'enabled', False)
         upstage_hyde_enabled = getattr(cfg.retrieve.dense_upstage_hyde, 'enabled', False)
+        gemini_enabled = getattr(cfg.retrieve.dense_gemini, 'enabled', False)
+        gemini_hyde_enabled = getattr(cfg.retrieve.dense_gemini_hyde, 'enabled', False)
 
         documents = []
-        if not sparse_enabled and not upstage_enabled and not sbert_enabled and not upstage_hyde_enabled:
+        if not sparse_enabled and not upstage_enabled and not sbert_enabled and not upstage_hyde_enabled and not gemini_enabled and not gemini_hyde_enabled:
             # 리트리브 비활성화: 전체 문서를 리랭킹 대상으로 사용
             documents = retrieve_all(es, index_name)
         else:
@@ -436,6 +671,8 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             upstage_count = 0
             sbert_count = 0
             hyde_count = 0
+            gemini_count = 0
+            gemini_hyde_count = 0
             if sparse_enabled:
                 sparse_result = sparse_retrieve(es, index_name, standalone_query, cfg.retrieve.sparse.top_k)
                 sparse_retrieved = len(sparse_result['hits']['hits'])
@@ -512,6 +749,49 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                         hyde_count += 1
                 log.info(f"Dense Upstage HyDE retrieve: {hyde_retrieved}개 검색, {hyde_count}개 추가 (중복 {hyde_retrieved - hyde_count}개)")
 
+            # Gemini Dense Retrieve
+            if gemini_enabled and dense_ctx and dense_ctx.get('gemini'):
+                dg = dense_ctx['gemini']
+                dense_result = dense_retrieve_gemini(
+                    es, dg.get('model'), index_name, standalone_query,
+                    cfg.retrieve.dense_gemini.top_k, cfg.retrieve.dense_gemini.num_candidates
+                )
+                gemini_retrieved = len(dense_result['hits']['hits'])
+                for rst in dense_result['hits']['hits']:
+                    src = rst.get("_source", {})
+                    docid = src.get("docid")
+                    if docid and docid not in docids:
+                        docids.add(docid)
+                        documents.append({
+                            "content": src.get("content", ""),
+                            "docid": docid,
+                            "score": rst.get("_score", 0.0)
+                        })
+                        gemini_count += 1
+                log.info(f"Dense Gemini retrieve: {gemini_retrieved}개 검색, {gemini_count}개 추가 (중복 {gemini_retrieved - gemini_count}개)")
+
+            # HyDE 기법을 활용한 Gemini Dense Retrieve
+            if gemini_hyde_enabled and dense_ctx and dense_ctx.get('gemini_hyde'):
+                dgh = dense_ctx['gemini_hyde']
+                dense_result = dense_retrieve_gemini_hyde(
+                    es, dgh.get('model'), index_name, standalone_query,
+                    cfg.retrieve.dense_gemini_hyde.top_k, cfg.retrieve.dense_gemini_hyde.num_candidates,
+                    client, cfg
+                )
+                gemini_hyde_retrieved = len(dense_result['hits']['hits'])
+                for rst in dense_result['hits']['hits']:
+                    src = rst.get("_source", {})
+                    docid = src.get("docid")
+                    if docid and docid not in docids:
+                        docids.add(docid)
+                        documents.append({
+                            "content": src.get("content", ""),
+                            "docid": docid,
+                            "score": rst.get("_score", 0.0)
+                        })
+                        gemini_hyde_count += 1
+                log.info(f"Dense Gemini HyDE retrieve: {gemini_hyde_retrieved}개 검색, {gemini_hyde_count}개 추가 (중복 {gemini_hyde_retrieved - gemini_hyde_count}개)")
+
             # 전체 retrieve 요약 로그 출력
             active_methods = []
             if sparse_enabled and sparse_count > 0:
@@ -521,7 +801,11 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             if sbert_enabled and sbert_count > 0:
                 active_methods.append(f"SBERT({sbert_count})")
             if upstage_hyde_enabled and hyde_count > 0:
-                active_methods.append(f"HyDE({hyde_count})")
+                active_methods.append(f"UpstageHyDE({hyde_count})")
+            if gemini_enabled and gemini_count > 0:
+                active_methods.append(f"Gemini({gemini_count})")
+            if gemini_hyde_enabled and gemini_hyde_count > 0:
+                active_methods.append(f"GeminiHyDE({gemini_hyde_count})")
 
             total_docs = len(documents)
             summary = " + ".join(active_methods) if active_methods else "없음"
@@ -529,7 +813,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
 
         # Reranker가 활성화된 경우 reranking 수행
         if cfg.reranker.use_reranker and reranker_tokenizer is not None and reranker_model is not None:
-            reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg)
+            reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg, client)
         else:
             # Reranker가 비활성화된 경우 상위 top_k개만 선택
             reranked_documents = documents[:cfg.reranker.top_k]
@@ -547,24 +831,32 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             messages.append({"role": "assistant", "content": content})
             msg = [{"role": "system", "content": cfg.prompts.qa}] + messages
             try:
-                qaresult = client.chat.completions.create(
-                        model=cfg.model.name,
-                        messages=msg,
-                        temperature=cfg.model.temperature,
-                        seed=cfg.model.seed,
-                        timeout=cfg.model.qa_timeout
-                    )
+                qaresult = call_llm_unified(
+                    client=client,
+                    messages=msg,
+                    cfg=cfg
+                )
             except Exception:
                 traceback.print_exc()
                 return response
-            response["answer"] = qaresult.choices[0].message.content
+            # qaresult도 딕셔너리/객체 구분하여 처리
+            if isinstance(qaresult, dict):
+                response["answer"] = qaresult["choices"][0]["message"]["content"]
+            else:
+                response["answer"] = qaresult.choices[0].message.content
         else:
             # 현재 방식: 검색 결과만 반환
-            response["answer"] = result.choices[0].message.content
+            if isinstance(result, dict):
+                response["answer"] = result["choices"][0]["message"]["content"]
+            else:
+                response["answer"] = result.choices[0].message.content
 
     # 검색이 필요하지 않은 경우 바로 답변 생성
     else:
-        response["answer"] = result.choices[0].message.content
+        if isinstance(result, dict):
+            response["answer"] = result["choices"][0]["message"]["content"]
+        else:
+            response["answer"] = result.choices[0].message.content
 
     return response
 
@@ -588,7 +880,7 @@ def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, dense_
         idx = 0
         for line in f:
             j = json.loads(line)
-            log.info(f'🚩Test {idx} - Question: {j["msg"]}')
+            log.info(f'🚩Test {idx + 1} - Question: {j["msg"]}')
             response = answer_question(j["msg"], client, cfg, es, index_name, dense_ctx, reranker_tokenizer, reranker_model, reranker_aux)
             log.info(f'Answer: {response["answer"]}')
             log.info(f'Retrieved {"👆일반질문👆" if len(response["topk"]) == 0 else len(response["topk"])} documents: {response["topk"]}')
@@ -620,16 +912,17 @@ def main(cfg: DictConfig) -> None:
     log = logging.getLogger(__name__)
     log.info("Starting RAG evaluation process")
     
-    # OpenAI API 키 환경변수 확인
-    if not os.getenv("OPENAI_API_KEY"):
-        raise ValueError("OPENAI_API_KEY environment variable is required")
-
-    # OpenAI 클라이언트 생성
-    openai_base_url = os.getenv("OPENAI_BASE_URL")
-    if openai_base_url:
-        client = OpenAI(base_url=openai_base_url)
+    # LLM API 키 환경변수 확인 (모델에 따라)
+    model_name = cfg.model.name.lower()
+    if "gemini" in model_name:
+        if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+            raise ValueError("Gemini 모델 사용시 GEMINI_API_KEY 또는 GOOGLE_API_KEY environment variable is required")
     else:
-        client = OpenAI()
+        if not os.getenv("OPENAI_API_KEY"):
+            raise ValueError("OPENAI_API_KEY environment variable is required")
+
+    # LLM 클라이언트 생성 (OpenAI 또는 Gemini)
+    client = create_llm_client(cfg)
 
     # Elasticsearch 설정
     es_password = os.getenv("ELASTICSEARCH_PASSWORD")
@@ -648,11 +941,25 @@ def main(cfg: DictConfig) -> None:
     upstage_enabled = getattr(cfg.retrieve.dense_upstage, 'enabled', False)
     sbert_enabled = getattr(cfg.retrieve.dense_sbert, 'enabled', False)
     upstage_hyde_enabled = getattr(cfg.retrieve.dense_upstage_hyde, 'enabled', False)
+    gemini_enabled = getattr(cfg.retrieve.dense_gemini, 'enabled', False)
+    gemini_hyde_enabled = getattr(cfg.retrieve.dense_gemini_hyde, 'enabled', False)
 
     # 백엔드별 모델 초기화 (활성화된 경우에만)
     # upstage 또는 upstage_hyde가 활성화된 경우 solar_model 필요
     solar_model = UpstageEmbeddings(model=cfg.retrieve.dense_upstage.model_name) if (upstage_enabled or upstage_hyde_enabled) else None
     sbert_model = SentenceTransformer(cfg.retrieve.dense_sbert.model_name) if sbert_enabled else None
+
+    # Gemini 임베딩 모델 초기화 (gemini 또는 gemini_hyde가 활성화된 경우)
+    gemini_model = None
+    if gemini_enabled or gemini_hyde_enabled:
+        google_api_key = os.getenv("GOOGLE_API_KEY")
+        if not google_api_key:
+            raise ValueError("Gemini 임베딩 사용시 GOOGLE_API_KEY가 필요합니다.")
+        gemini_model = GoogleGenerativeAIEmbeddings(
+            model=cfg.retrieve.dense_gemini.model_name,
+            google_api_key=google_api_key
+        )
+        log.info(f"Gemini 임베딩 모델 초기화: {cfg.retrieve.dense_gemini.model_name}")
 
     # Elasticsearch 인덱스 설정
     # Elasticsearch 9.x에서는 Nori의 품사 태그가 세분화되어
@@ -715,6 +1022,15 @@ def main(cfg: DictConfig) -> None:
             "similarity": "l2_norm"
         }
 
+    # Gemini 임베딩이 활성화된 경우에만 필드 추가 (3072차원)
+    if gemini_enabled or gemini_hyde_enabled:
+        mappings["properties"]["embeddings_gemini"] = {
+            "type": "dense_vector",
+            "dims": 3072,
+            "index": True,
+            "similarity": "l2_norm"
+        }
+
     # 인덱스 생성 또는 재사용
     force_recreate = getattr(cfg.index, 'force_recreate', True)
     index_exists = es.indices.exists(index=cfg.index.name)
@@ -744,6 +1060,30 @@ def main(cfg: DictConfig) -> None:
                 contents = [d["content"] for d in batch]
                 sbert_embeds.extend(sbert_get_embedding(contents, sbert_model))
 
+        # Gemini(3072) - 별도 스크립트로 생성된 임베딩 로드
+        gemini_embeds = None
+        if (gemini_enabled or gemini_hyde_enabled) and gemini_model is not None:
+            try:
+                from gemini_embedding_generator import GeminiEmbeddingGenerator
+                generator = GeminiEmbeddingGenerator(cfg)
+                gemini_embeds = generator.get_all_embeddings()
+
+                if gemini_embeds is None:
+                    log.warning("Gemini 임베딩이 없습니다. 다음 명령을 먼저 실행하세요:")
+                    log.warning("python gemini_embedding_generator.py")
+                    log.warning("Gemini 임베딩 없이 계속 진행합니다...")
+                    # Gemini 기능 비활성화
+                    gemini_enabled = False
+                    gemini_hyde_enabled = False
+                else:
+                    log.info(f"Gemini 임베딩 로드 완료: {len(gemini_embeds)}개")
+            except Exception as e:
+                log.error(f"Gemini 임베딩 로드 실패: {e}")
+                log.warning("Gemini 임베딩 없이 계속 진행합니다...")
+                gemini_enabled = False
+                gemini_hyde_enabled = False
+                gemini_embeds = None
+
         # 문서에 필요한 필드만 추가하여 색인
         for idx, doc in enumerate(docs):
             if solar_embeds is not None:
@@ -756,6 +1096,11 @@ def main(cfg: DictConfig) -> None:
                 if hasattr(vec, 'tolist'):
                     vec = vec.tolist()
                 doc["embeddings_sbert"] = vec
+            if gemini_embeds is not None:
+                vec = gemini_embeds[idx]
+                if hasattr(vec, 'tolist'):
+                    vec = vec.tolist()
+                doc["embeddings_gemini"] = vec
             index_docs.append(doc)
 
         ret = bulk_add(es, cfg.index.name, index_docs)
@@ -770,6 +1115,8 @@ def main(cfg: DictConfig) -> None:
             del solar_embeds
         if 'sbert_embeds' in locals() and sbert_embeds is not None:
             del sbert_embeds
+        if 'gemini_embeds' in locals() and gemini_embeds is not None:
+            del gemini_embeds
         if 'index_docs' in locals():
             del index_docs
         if 'docs' in locals():
@@ -797,6 +1144,8 @@ def main(cfg: DictConfig) -> None:
         'upstage': {'model': solar_model} if upstage_enabled and solar_model is not None else None,
         'sbert': {'model': sbert_model} if sbert_enabled and sbert_model is not None else None,
         'upstage_hyde': {'model': solar_model} if upstage_hyde_enabled and solar_model is not None else None,
+        'gemini': {'model': gemini_model} if gemini_enabled and gemini_model is not None else None,
+        'gemini_hyde': {'model': gemini_model} if gemini_hyde_enabled and gemini_model is not None else None,
     }
     eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name, dense_ctx)
     log.info('RAG evaluation process completed')
