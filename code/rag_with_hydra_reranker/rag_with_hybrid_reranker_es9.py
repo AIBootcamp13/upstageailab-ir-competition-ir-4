@@ -144,29 +144,46 @@ def sparse_retrieve(es, index_name, query_str, size):
 
 # Vector 유사도를 이용한 검색 (backend별)
 def dense_retrieve_upstage(es, model, index_name, query_str, size, num_candidates=100):
+    log = logging.getLogger(__name__)
     # 쿼리 임베딩 (4096차원)
     query_embedding = upstage_get_embedding([query_str], model, is_query=True)
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
+
+    # num_candidates 보정 (k <= num_candidates 유지)
+    orig_num_cand = num_candidates
+    if num_candidates < size:
+        num_candidates = size
+        log.warning(f"[Upstage] num_candidates({orig_num_cand}) < k/size({size}) → num_candidates={num_candidates}로 보정")
+
     knn = {
         "field": "embeddings_upstage",
         "query_vector": query_embedding,
         "k": size,
         "num_candidates": num_candidates
     }
-    return es.search(index=index_name, knn=knn)
+    # top-level size로 최종 반환 개수 지정
+    return es.search(index=index_name, knn=knn, size=size)
 
 def dense_retrieve_sbert(es, model, index_name, query_str, size, num_candidates=100):
+    log = logging.getLogger(__name__)
     query_embedding = sbert_get_embedding([query_str], model)[0]
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
+
+    # num_candidates 보정
+    orig_num_cand = num_candidates
+    if num_candidates < size:
+        num_candidates = size
+        log.warning(f"[SBERT] num_candidates({orig_num_cand}) < k/size({size}) → num_candidates={num_candidates}로 보정")
+
     knn = {
         "field": "embeddings_sbert",
         "query_vector": query_embedding,
         "k": size,
         "num_candidates": num_candidates
     }
-    return es.search(index=index_name, knn=knn)
+    return es.search(index=index_name, knn=knn, size=size)
 
 # HyDE 캐시 (간단한 메모리 캐시)
 _hyde_cache = {}
@@ -225,31 +242,47 @@ def dense_retrieve_upstage_hyde(es, model, index_name, query_str, size, num_cand
     hypothetical_doc = generate_hypothetical_document(query_str, client, cfg)
 
     # 2단계: 가상 문서를 임베딩하여 검색 (기존 dense_retrieve_upstage와 동일)
+    log = logging.getLogger(__name__)
     query_embedding = upstage_get_embedding([hypothetical_doc], model, is_query=True)
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
+
+    # num_candidates 보정
+    orig_num_cand = num_candidates
+    if num_candidates < size:
+        num_candidates = size
+        log.warning(f"[Upstage-HyDE] num_candidates({orig_num_cand}) < k/size({size}) → num_candidates={num_candidates}로 보정")
+
     knn = {
         "field": "embeddings_upstage",
         "query_vector": query_embedding,
         "k": size,
         "num_candidates": num_candidates
     }
-    return es.search(index=index_name, knn=knn)
+    return es.search(index=index_name, knn=knn, size=size)
 
 # Gemini Vector 유사도를 이용한 검색
 def dense_retrieve_gemini(es, model, index_name, query_str, size, num_candidates=100):
     """Gemini 임베딩을 사용한 dense retrieve"""
     # 쿼리 임베딩 (3072차원)
+    log = logging.getLogger(__name__)
     query_embedding = gemini_get_embedding([query_str], model, is_query=True)
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
+
+    # num_candidates 보정
+    orig_num_cand = num_candidates
+    if num_candidates < size:
+        num_candidates = size
+        log.warning(f"[Gemini] num_candidates({orig_num_cand}) < k/size({size}) → num_candidates={num_candidates}로 보정")
+
     knn = {
         "field": "embeddings_gemini",
         "query_vector": query_embedding,
         "k": size,
         "num_candidates": num_candidates
     }
-    return es.search(index=index_name, knn=knn)
+    return es.search(index=index_name, knn=knn, size=size)
 
 # HyDE 기법을 활용한 Gemini Dense Retrieve
 def dense_retrieve_gemini_hyde(es, model, index_name, query_str, size, num_candidates, client, cfg):
@@ -258,16 +291,24 @@ def dense_retrieve_gemini_hyde(es, model, index_name, query_str, size, num_candi
     hypothetical_doc = generate_hypothetical_document(query_str, client, cfg)
 
     # 2단계: 가상 문서를 Gemini 임베딩하여 검색
+    log = logging.getLogger(__name__)
     query_embedding = gemini_get_embedding([hypothetical_doc], model, is_query=True)
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
+
+    # num_candidates 보정
+    orig_num_cand = num_candidates
+    if num_candidates < size:
+        num_candidates = size
+        log.warning(f"[Gemini-HyDE] num_candidates({orig_num_cand}) < k/size({size}) → num_candidates={num_candidates}로 보정")
+
     knn = {
         "field": "embeddings_gemini",
         "query_vector": query_embedding,
         "k": size,
         "num_candidates": num_candidates
     }
-    return es.search(index=index_name, knn=knn)
+    return es.search(index=index_name, knn=knn, size=size)
 
 def retrieve_all(es, index_name):
     """모든 문서를 조회하여 리랭킹 후보로 사용하기 위한 리스트를 반환한다.
@@ -588,6 +629,10 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
             "seed": cfg.model.seed,
             "timeout": cfg.model.timeout
         }
+
+        # reasoning_effort 지원 (o3 계열 등)
+        if hasattr(cfg.model, 'reasoning_effort') and getattr(cfg.model, 'reasoning_effort'):
+            params["reasoning_effort"] = cfg.model.reasoning_effort
 
         if tools:
             params["tools"] = tools

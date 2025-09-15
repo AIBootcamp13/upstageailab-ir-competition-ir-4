@@ -8,7 +8,6 @@ model:
   seed: 1
   timeout: 1000
   reasoning_effort: "high"
-  qa_timeout: 1000
 
 # 평가 설정
 eval:
@@ -37,6 +36,7 @@ prompts:
     - 과학 상식 범위 내에서 설명 가능하더라도 반드시 search api를 호출해야 한다.
     - 추가 검색 없이도 과학 상식으로 설명 가능한 범위이더라도 반드시 search api를 호출해야 한다.
     - 어떤 사건에 관한것이거나 코드 프로그램적인 질문을 하더라도 반드시 search api를 호출해야 한다.
+    - 평균을 구하는 코드 질문인경우 반드시 search api를 호출해야 한다.
     - search api를 호출할 때는 반드시 질문에 대한 최종 korean query를 생성해서 호출해야 한다.
 
   standalone_query_description: "Final korean query suitable for use in search from the user messages history."
@@ -49,7 +49,7 @@ retrieve:
     enabled: true   # sparse retrieve 활성화 여부
     top_k: 40       # sparse_retrieve에서 가져올 문서 수
   dense_upstage:
-    enabled: false   # Upstage 임베딩 기반 dense 활성화 여부
+    enabled: true   # Upstage 임베딩 기반 dense 활성화 여부
     model_name: "solar-embedding-1-large"
     top_k: 40       # dense_retrieve_upstage에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
@@ -97,7 +97,7 @@ logging:
 # 인덱스 설정
 index:
   name: "test"
-  force_recreate: true  # false면 기존 인덱스 재사용, true면 삭제 후 재생성
+  force_recreate: false  # false면 기존 인덱스 재사용, true면 삭제 후 재생성
 
 # Elasticsearch 설정
 elasticsearch:
