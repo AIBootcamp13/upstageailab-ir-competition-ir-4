@@ -1,8 +1,10 @@
 # 모델 설정
 model:
-  name: "solar-pro2"  # solar-pro2 또는 gemini-2.5-flash 등 사용 가능
+  name: "solar-pro2"  # solar-pro2, gemini-2.5-flash, gemini-2.5-flash-lite 등 사용 가능
   delay_seconds: 0  # Gemini rate limit 회피를 위한 각 호출 전 대기 시간 (초)
-  # name: "gemini-2.5-flash"  # solar-pro2 또는 gemini-2.5-flash 등 사용 가능
+  retry_max: 5  # LLM 호출 재시도 최대 횟수
+  retry_delay_seconds: 30  # 재시도 간 대기 시간(초)
+  # name: "gemini-2.5-flash-lite"  # solar-pro2, gemini-2.5-flash, gemini-2.5-flash-lite 등 사용 가능
   # delay_seconds: 7  # Gemini rate limit 회피를 위한 각 호출 전 대기 시간 (초)
   temperature: 0
   seed: 1

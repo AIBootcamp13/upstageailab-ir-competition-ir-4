@@ -541,6 +541,10 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
 
     # Gemini 클라이언트인지 확인 (더 정확한 타입 체크)
     if isinstance(client, genai.Client):  # genai.Client
+        # 재시도 설정값 로드 (기본값: 최대 5회, 30초 대기)
+        retry_max = int(getattr(cfg.model, 'retry_max', 5) or 5)
+        retry_delay = int(getattr(cfg.model, 'retry_delay_seconds', 30) or 30)
+
         # OpenAI 메시지 형식을 Gemini types.Content 형식으로 변환
         contents = []
         for msg in messages:
@@ -575,11 +579,51 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
             tools=gemini_tools if gemini_tools else None,
         )
 
-        response = client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=config,
-        )
+        # 2xx가 아닌 응답/예외 발생 시 재시도
+        last_exc = None
+        response = None
+        for attempt in range(1, retry_max + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config,
+                )
+                # google-genai 클라이언트는 2xx 외에는 예외를 던지는 것이 일반적이므로
+                # 성공적으로 객체가 반환되면 그대로 진행
+                break
+            except Exception as e:
+                # 상태 코드 추출 시도
+                status_code = None
+                try:
+                    status_code = getattr(e, 'status_code', None)
+                except Exception:
+                    pass
+                try:
+                    if status_code is None and hasattr(e, 'response') and getattr(e, 'response') is not None:
+                        status_code = getattr(e.response, 'status_code', None)
+                except Exception:
+                    pass
+
+                # 예외 메시지에서 503 등 키워드 추출 (fallback)
+                status_hint = None
+                msg_text = str(e)
+                if 'HTTP/1.1' in msg_text or 'Service Unavailable' in msg_text or '503' in msg_text:
+                    status_hint = 'non-2xx (likely 503)'
+
+                # 재시도 여부 판단: 2xx가 아니거나 상태 코드를 알 수 없어도 예외가 발생한 경우 재시도
+                should_retry = True
+                if status_code is not None:
+                    should_retry = not (200 <= int(status_code) < 300)
+
+                last_exc = e
+                if attempt < retry_max and should_retry:
+                    sc_str = f"status={status_code}" if status_code is not None else (f"hint={status_hint}" if status_hint else "status=unknown")
+                    log.warning(f"Gemini 호출 실패(시도 {attempt}/{retry_max}, {sc_str}). {retry_delay}초 후 재시도합니다...")
+                    time.sleep(retry_delay)
+                    continue
+                # 마지막 시도이거나, 재시도 대상이 아니면 예외 재전파
+                raise
 
         # OpenAI 형식으로 응답 변환
         result = {
