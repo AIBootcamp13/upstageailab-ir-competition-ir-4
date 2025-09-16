@@ -10,6 +10,9 @@ llm:
   seed: 1
   timeout: 1000
   reasoning_effort: "high"
+  cache:
+    enabled: true
+    dir: "cache/llm"
 
 # 평가 설정
 eval:

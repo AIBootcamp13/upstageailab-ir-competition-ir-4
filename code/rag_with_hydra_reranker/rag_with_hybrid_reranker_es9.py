@@ -513,6 +513,7 @@ from google import genai
 from google.genai import types
 import traceback
 import time
+from utils.llm_cache import make_key, get_cache_entry, set_cache_entry
 
 # OpenAI 및 Gemini 클라이언트 생성 함수
 def create_llm_client(cfg):
@@ -551,15 +552,41 @@ def apply_llm_delay(cfg):
         time.sleep(delay_seconds)
 
 def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
-    """OpenAI/Gemini 통합 LLM 호출 함수"""
+    """OpenAI/Gemini 통합 LLM 호출 함수 (디스크 캐시 연동)"""
     log = logging.getLogger(__name__)
     model_name = cfg.llm.model
+    # provider/base_url 판별 및 공통 파라미터 구성
+    is_gemini = isinstance(client, genai.Client)
+    provider = "gemini" if is_gemini else "openai"
+    base_url = os.getenv("OPENAI_BASE_URL") if provider == "openai" else ""
 
-    # rate limit 회피를 위한 대기
-    apply_llm_delay(cfg)
+    # 캐시 설정
+    cache_enabled = getattr(getattr(cfg.llm, 'cache', {}), 'enabled', False)
+    cache_dir = getattr(getattr(cfg.llm, 'cache', {}), 'dir', 'cache/llm')
+
+    # 키 생성을 위한 공통 파라미터
+    key_params = {
+        "temperature": cfg.llm.temperature,
+        "seed": cfg.llm.seed,
+        "timeout": cfg.llm.timeout,
+        "reasoning_effort": getattr(cfg.llm, 'reasoning_effort', None),
+    }
+
+    # 캐시 조회 (히트/미스 로그 의무 출력)
+    cache_key = make_key(provider, base_url, model_name, messages, tools, tool_choice, key_params)
+    if cache_enabled:
+        cached = get_cache_entry(cache_dir, provider, model_name, cache_key)
+        if cached is not None:
+            log.info(f"LLM 캐시 적중 provider={provider} model={model_name} key={cache_key[:10]}")
+            return cached
+        else:
+            log.info(f"LLM 캐시 미스 provider={provider} model={model_name} key={cache_key[:10]}")
 
     # Gemini 클라이언트인지 확인 (더 정확한 타입 체크)
-    if isinstance(client, genai.Client):  # genai.Client
+    if is_gemini:  # genai.Client
+        # 캐시 미스 시에만 대기 적용 (위에서 미스 로그 출력됨)
+        if cache_enabled:
+            apply_llm_delay(cfg)
         # 재시도 설정값 로드 (기본값: 최대 5회, 30초 대기)
         retry_max = int(getattr(cfg.llm, 'retry_max', 5) or 5)
         retry_delay = int(getattr(cfg.llm, 'retry_delay_seconds', 30) or 30)
@@ -683,9 +710,16 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
                 if text_parts:
                     result["choices"][0]["message"]["content"] = "".join(text_parts)
 
+        # 캐시 저장 및 반환
+        if cache_enabled:
+            set_cache_entry(cache_dir, provider, model_name, cache_key, result)
+            log.info(f"LLM 캐시 저장 provider={provider} model={model_name} key={cache_key[:10]}")
         return result
     else:  # OpenAI 클라이언트
-        params = {
+        # 캐시 미스 시에만 대기 적용 (위에서 미스 로그 출력됨)
+        if cache_enabled:
+            apply_llm_delay(cfg)
+        openai_params = {
             "model": model_name,
             "messages": messages,
             "temperature": cfg.llm.temperature,
@@ -695,14 +729,32 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
 
         # reasoning_effort 지원 (o3 계열 등)
         if hasattr(cfg.llm, 'reasoning_effort') and getattr(cfg.llm, 'reasoning_effort'):
-            params["reasoning_effort"] = cfg.llm.reasoning_effort
+            openai_params["reasoning_effort"] = cfg.llm.reasoning_effort
 
         if tools:
-            params["tools"] = tools
+            openai_params["tools"] = tools
         if tool_choice:
-            params["tool_choice"] = tool_choice
+            openai_params["tool_choice"] = tool_choice
 
-        return client.chat.completions.create(**params)
+        raw = client.chat.completions.create(**openai_params)
+        try:
+            resp = raw.model_dump()
+        except Exception:
+            # 최소 호환 dict 구성 (필요시 확장)
+            resp = {
+                "choices": [{
+                    "message": {
+                        "content": getattr(getattr(raw, 'choices', [{}])[0], 'message', {}).get('content', None),
+                        "role": "assistant",
+                        "tool_calls": getattr(getattr(raw, 'choices', [{}])[0], 'message', {}).get('tool_calls', None)
+                    }
+                }]
+            }
+
+        if cache_enabled:
+            set_cache_entry(cache_dir, provider, model_name, cache_key, resp)
+            log.info(f"LLM 캐시 저장 provider={provider} model={model_name} key={cache_key[:10]}")
+        return resp
 
 # 프롬프트들은 config.yaml에서 관리
 
