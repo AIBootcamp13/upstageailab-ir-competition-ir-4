@@ -104,7 +104,7 @@ def dense_retrieve(es, model, index_name, query_str, size, num_candidates=100, p
         "k": size,
         "num_candidates": num_candidates
     }
-    return es.search(index=index_name, knn=knn)
+    return es.search(index=index_name, knn=knn, size=size)
 
 # 공식 사용법 기반 Qwen3-Reranker-8B 초기화 (CausalLM + yes/no)
 def initialize_reranker(cfg):
@@ -283,6 +283,7 @@ def get_tools(cfg):
 
 
 # LLM과 검색엔진을 활용한 RAG 구현
+# LLM과 검색엔진을 활용한 RAG 구현
 def answer_question(messages, client, cfg, es, index_name, dense_model=None, reranker_tokenizer=None, reranker_model=None, reranker_aux=None):
     # 함수 출력 초기화
     response = {"standalone_query": "", "topk": [], "references": [], "answer": ""}
@@ -294,7 +295,6 @@ def answer_question(messages, client, cfg, es, index_name, dense_model=None, rer
             model=cfg.model.name,
             messages=msg,
             tools=get_tools(cfg),
-            #tool_choice={"type": "function", "function": {"name": "search"}},
             temperature=cfg.model.temperature,
             seed=cfg.model.seed,
             timeout=cfg.model.timeout,
@@ -316,33 +316,53 @@ def answer_question(messages, client, cfg, es, index_name, dense_model=None, rer
 
         response["standalone_query"] = standalone_query
         
-        # 결과 합치기 (중복 docid 제거)
-        docids = set()
-        documents = []
+        # === 코드 수정 시작 ===
+        
+        # 결과 합치기 및 중복 표기
+        # docid를 키로 사용하여 문서를 효율적으로 관리
+        merged_docs = {}
+
+        # 1. Sparse 결과 먼저 처리
         for rst in sparse_result['hits']['hits']:
             docid = rst["_source"]["docid"]
-            if docid not in docids:
-                docids.add(docid)
-                documents.append({
+            if docid not in merged_docs:
+                merged_docs[docid] = {
                     "content": rst["_source"]["content"],
                     "docid": docid,
-                    "score": rst["_score"]
-                })
+                    "score": rst["_score"],
+                    "is_duplicated": False,  # 초기값은 False
+                    "source": "sparse"
+                }
+
+        # 2. Dense 결과 처리
         for rst in dense_result['hits']['hits']:
             docid = rst["_source"]["docid"]
-            if docid not in docids:
-                docids.add(docid)
-                documents.append({
+            if docid in merged_docs:
+                # 이미 sparse 결과에 포함된 문서인 경우, 중복 플래그를 True로 변경
+                merged_docs[docid]["is_duplicated"] = True
+                # 소스 정보를 업데이트하여 어디서 중복되었는지 표시
+                merged_docs[docid]["source"] += ", dense"
+            else:
+                # 새로운 문서인 경우 추가
+                merged_docs[docid] = {
                     "content": rst["_source"]["content"],
                     "docid": docid,
-                    "score": rst["_score"]
-                })
+                    "score": rst["_score"],
+                    "is_duplicated": False,
+                    "source": "dense"
+                }
+        
+        # 딕셔너리의 값들을 리스트로 변환하여 최종 documents 리스트 생성
+        documents = list(merged_docs.values())
+        
+        # === 코드 수정 끝 ===
         
         # Reranker가 활성화된 경우 reranking 수행
         if cfg.reranker.use_reranker and reranker_tokenizer is not None and reranker_model is not None:
             reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg)
         else:
-            # Reranker가 비활성화된 경우 상위 top_k개만 선택
+            # Reranker가 비활성화된 경우, 점수 기반으로 정렬 후 상위 K개 선택 (주의: 점수 척도가 다름)
+            # 여기서는 단순히 리스트 순서대로 상위 K개를 선택
             reranked_documents = documents[:cfg.reranker.top_k]
         
         # 최종 결과를 response에 저장
@@ -350,7 +370,13 @@ def answer_question(messages, client, cfg, es, index_name, dense_model=None, rer
         for doc in reranked_documents:
             retrieved_context.append(doc["content"])
             response["topk"].append(doc["docid"])
-            response["references"].append({"score": doc["score"], "content": doc["content"]})
+            # 'is_duplicated'와 'source' 정보를 references에 추가
+            response["references"].append({
+                "score": doc["score"], 
+                "content": doc["content"],
+                "is_duplicated": doc["is_duplicated"],
+                "source": doc["source"]
+            })
 
         if cfg.qa.use_final_answer:
             # 검색된 컨텍스트로 별도 QA 수행
@@ -359,12 +385,12 @@ def answer_question(messages, client, cfg, es, index_name, dense_model=None, rer
             msg = [{"role": "system", "content": cfg.prompts.qa}] + messages
             try:
                 qaresult = client.chat.completions.create(
-                        model=cfg.model.name,
-                        messages=msg,
-                        temperature=cfg.model.temperature,
-                        seed=cfg.model.seed,
-                        timeout=cfg.model.qa_timeout
-                    )
+                    model=cfg.model.name,
+                    messages=msg,
+                    temperature=cfg.model.temperature,
+                    seed=cfg.model.seed,
+                    timeout=cfg.model.qa_timeout
+                )
             except Exception:
                 traceback.print_exc()
                 return response
