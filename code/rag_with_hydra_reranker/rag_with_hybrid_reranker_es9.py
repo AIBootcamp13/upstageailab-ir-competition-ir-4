@@ -836,19 +836,17 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
         retry_max = int(getattr(cfg.llm, 'retry_max', 5) or 5)
         retry_delay = int(getattr(cfg.llm, 'retry_delay_seconds', 30) or 30)
 
-        # OpenAI 메시지 형식을 Gemini types.Content 형식으로 변환
+        # OpenAI 메시지를 Gemini 형식으로 변환하되 system 프롬프트는 systemInstruction에 전달
         contents = []
+        system_instruction_text = None
         for msg in messages:
-            role = "user" if msg["role"] in ["user", "system"] else "model"
-            # system 메시지는 user로 포함 (Gemini는 system role 없음)
-            content_text = msg["content"]
-            if msg["role"] == "system":
-                content_text = f"System: {content_text}"
-
-            contents.append(types.Content(
-                role=role,
-                parts=[types.Part.from_text(text=content_text)]
-            ))
+            role_in = msg.get("role", "user")
+            text = msg.get("content", "")
+            if role_in == "system":
+                system_instruction_text = (system_instruction_text + "\n" + text) if system_instruction_text else text
+                continue
+            role = "user" if role_in == "user" else "model"
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
 
         # Gemini tool calling 지원
         gemini_tools = None
@@ -865,9 +863,26 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
                     )
                     gemini_tools.append(types.Tool(function_declarations=[gemini_func]))
 
+        # HyDE 프롬프트가 감지되면 AFC 비활성화 (HyDE는 함수호출 불필요)
+        afc = None
+        try:
+            use_hyde = False
+            hyde_hint = getattr(getattr(cfg, 'prompts', object()), 'hyde', None)
+            if hyde_hint:
+                for m in messages:
+                    if m.get('content') and hyde_hint in m.get('content'):
+                        use_hyde = True
+                        break
+            if use_hyde:
+                afc = types.AutomaticFunctionCallingConfig(disable=True)
+        except Exception:
+            afc = None
+
         config = types.GenerateContentConfig(
             temperature=cfg.llm.temperature,
             tools=gemini_tools if gemini_tools else None,
+            systemInstruction=system_instruction_text,
+            automaticFunctionCalling=afc,
         )
 
         # 2xx가 아닌 응답/예외 발생 시 재시도
@@ -976,10 +991,24 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
         if hasattr(cfg.llm, 'reasoning_effort') and getattr(cfg.llm, 'reasoning_effort'):
             openai_params["reasoning_effort"] = cfg.llm.reasoning_effort
 
-        if tools:
-            openai_params["tools"] = tools
-        if tool_choice:
-            openai_params["tool_choice"] = tool_choice
+        # HyDE 프롬프트가 감지되면 함수 호출 비활성화 (HyDE는 함수호출 불필요)
+        use_hyde_openai = False
+        try:
+            hyde_hint = getattr(getattr(cfg, 'prompts', object()), 'hyde', None)
+            if hyde_hint:
+                for m in messages:
+                    if m.get('content') and hyde_hint in m.get('content'):
+                        use_hyde_openai = True
+                        break
+        except Exception:
+            use_hyde_openai = False
+
+        # HyDE 미사용시에만 tools와 tool_choice 설정
+        if not use_hyde_openai:
+            if tools:
+                openai_params["tools"] = tools
+            if tool_choice:
+                openai_params["tool_choice"] = tool_choice
 
         raw = client.chat.completions.create(**openai_params)
         try:
@@ -1326,20 +1355,21 @@ def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, dense_
         idx = 0
         for line in f:
             j = json.loads(line)
-            log.info(f'🚩Test {idx + 1} - Question: {j["msg"]}')
-            response = answer_question(j["msg"], client, cfg, es, index_name, dense_ctx, reranker_tokenizer, reranker_model, reranker_aux)
-            log.info(f'Answer: {response["answer"]}')
-            log.info(f'Retrieved {"👆일반질문👆" if len(response["topk"]) == 0 else len(response["topk"])} documents: {response["topk"]}')
-            log.debug(f'References: {len(response["references"])} items')
+            if idx + 1 == 115 or idx + 1 == 117:
+                log.info(f'🚩Test {idx + 1} - Question: {j["msg"]}')
+                response = answer_question(j["msg"], client, cfg, es, index_name, dense_ctx, reranker_tokenizer, reranker_model, reranker_aux)
+                log.info(f'Answer: {response["answer"]}')
+                log.info(f'Retrieved {"👆일반질문👆" if len(response["topk"]) == 0 else len(response["topk"])} documents: {response["topk"]}')
+                log.debug(f'References: {len(response["references"])} items')
 
-            # 일반질문일 경우 리스트에 저장
-            if len(response["topk"]) == 0:
-                general_questions.append({"eval_id": j["eval_id"], "answer": response["answer"]})
-                general_eval_ids.append(j["eval_id"])
+                # 일반질문일 경우 리스트에 저장
+                if len(response["topk"]) == 0:
+                    general_questions.append({"eval_id": j["eval_id"], "answer": response["answer"]})
+                    general_eval_ids.append(j["eval_id"])
 
-            # 대회 score 계산은 topk 정보를 사용, answer 정보는 LLM을 통한 자동평가시 활용
-            output = {"eval_id": j["eval_id"], "standalone_query": response["standalone_query"], "topk": response["topk"], "answer": response["answer"], "references": response["references"]}
-            of.write(f'{json.dumps(output, ensure_ascii=False)}\n')
+                # 대회 score 계산은 topk 정보를 사용, answer 정보는 LLM을 통한 자동평가시 활용
+                output = {"eval_id": j["eval_id"], "standalone_query": response["standalone_query"], "topk": response["topk"], "answer": response["answer"], "references": response["references"]}
+                of.write(f'{json.dumps(output, ensure_ascii=False)}\n')
             idx += 1
 
             if cfg.eval.max_iterations > 0 and idx >= cfg.eval.max_iterations:
