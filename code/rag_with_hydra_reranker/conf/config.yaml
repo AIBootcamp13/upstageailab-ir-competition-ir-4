@@ -47,7 +47,11 @@ prompts:
   standalone_query_description: "Final korean query suitable for use in search from the user messages history."
 
   hyde: "다음 질문에 대해 전문적이고 사실과 정확한 정보를 바탕으로 핵심 정보가 포함된 요약 답변을 작성해줘."
-  
+
+# HyDE 전역 설정
+hyde:
+  use_original_query: false  # true면 원본 사용자 쿼리 사용, false면 standalone_query 사용
+
 # 리트리브 설정
 retrieve:
   sparse:

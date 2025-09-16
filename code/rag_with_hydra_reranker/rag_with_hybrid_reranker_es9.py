@@ -650,7 +650,7 @@ def _format_instruction(instruction, query, doc):
 
 
 # 공식 사용법 기반 reranking (배치 처리 및 메모리 관리 기능 추가)
-def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg, client=None):
+def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg, client=None, original_query=None):
     log = logging.getLogger(__name__)
 
     if reranker_tokenizer is None or reranker_model is None or reranker_aux is None:
@@ -664,13 +664,20 @@ def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reran
 
         # HyDE 기법 사용 여부 확인
         use_hyde = getattr(cfg.reranker, 'use_hyde', False)
-        rerank_query = query
+
+        # HyDE 전역 설정에 따라 기본 쿼리 결정
+        if getattr(cfg.hyde, 'use_original_query', False) and original_query:
+            base_query = original_query
+        else:
+            base_query = query
+
+        rerank_query = base_query
 
         if use_hyde and client is not None:
             log.info("Reranker HyDE 기법 활성화 - 가상 문서 생성 중...")
-            rerank_query = generate_hypothetical_document(query, client, cfg)
+            rerank_query = generate_hypothetical_document(base_query, client, cfg)
         elif use_hyde and client is None:
-            log.warning("Reranker HyDE 활성화되었으나 client가 없어 원본 쿼리 사용")
+            log.warning("Reranker HyDE 활성화되었으나 client가 없어 기본 쿼리 사용")
 
         log.info(f"Reranking with {'HyDE query' if use_hyde and client else 'original query'}")
 
@@ -1102,6 +1109,15 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
         # 설정 토글에 따른 검색 동작 분기
         response["standalone_query"] = standalone_query
 
+        # 원본 사용자 쿼리 추출 (HyDE 옵션용)
+        original_user_query = ""
+        if messages:
+            # 마지막 사용자 메시지에서 원본 쿼리 추출
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    original_user_query = msg.get("content", "")
+                    break
+
         sparse_enabled = getattr(cfg.retrieve.sparse, 'enabled', True)
         upstage_enabled = getattr(cfg.retrieve.dense_upstage, 'enabled', False)
         sbert_enabled = getattr(cfg.retrieve.dense_sbert, 'enabled', False)
@@ -1196,8 +1212,10 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             # HyDE 기법을 활용한 Upstage Dense Retrieve
             if upstage_hyde_enabled and dense_ctx and dense_ctx.get('upstage_hyde'):
                 duh = dense_ctx['upstage_hyde']
+                # HyDE 전역 설정에 따라 쿼리 선택
+                hyde_query = original_user_query if getattr(cfg.hyde, 'use_original_query', False) else standalone_query
                 dense_result = dense_retrieve_upstage_hyde(
-                    es, duh.get('model'), cfg.index.upstage.name, standalone_query,
+                    es, duh.get('model'), cfg.index.upstage.name, hyde_query,
                     cfg.retrieve.dense_upstage_hyde.top_k, cfg.retrieve.dense_upstage_hyde.num_candidates,
                     client, cfg
                 )
@@ -1245,8 +1263,10 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             # HyDE 기법을 활용한 Gemini Dense Retrieve
             if gemini_hyde_enabled and dense_ctx and dense_ctx.get('gemini_hyde'):
                 dgh = dense_ctx['gemini_hyde']
+                # HyDE 전역 설정에 따라 쿼리 선택
+                hyde_query = original_user_query if getattr(cfg.hyde, 'use_original_query', False) else standalone_query
                 dense_result = dense_retrieve_gemini_hyde(
-                    es, dgh.get('model'), cfg.index.gemini.name, standalone_query,
+                    es, dgh.get('model'), cfg.index.gemini.name, hyde_query,
                     cfg.retrieve.dense_gemini_hyde.top_k, cfg.retrieve.dense_gemini_hyde.num_candidates,
                     client, cfg
                 )
@@ -1288,7 +1308,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
 
         # Reranker가 활성화된 경우 reranking 수행
         if cfg.reranker.use_reranker and reranker_tokenizer is not None and reranker_model is not None:
-            reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg, client)
+            reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg, client, original_query)
         else:
             # Reranker가 비활성화된 경우 상위 top_k개만 선택
             reranked_documents = documents[:cfg.reranker.top_k]
