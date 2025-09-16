@@ -149,6 +149,178 @@ def bulk_add(es, index, docs):
     )
 
 
+# =========================
+# 인덱스 분리 운영 유틸
+# =========================
+
+def build_nori_settings():
+    return {
+        "analysis": {
+            "analyzer": {
+                "nori": {
+                    "type": "custom",
+                    "tokenizer": "nori_tokenizer",
+                    "decompound_mode": "mixed",
+                    "filter": ["nori_posfilter"]
+                }
+            },
+            "filter": {
+                "nori_posfilter": {
+                    "type": "nori_part_of_speech",
+                    "stoptags": [
+                        "EC", "EF", "EP", "ETN", "ETM",
+                        "JKS", "JKC", "JKG", "JKO", "JKB", "JKV", "JKQ", "JX", "JC",
+                        "SC", "SE", "SF", "SP", "SSO", "SSC", "SY",
+                        "VCP", "VCN", "VX"
+                    ]
+                }
+            }
+        }
+    }
+
+
+def mapping_sparse():
+    return {
+        "properties": {
+            "docid": {"type": "keyword"},
+            "content": {"type": "text", "analyzer": "nori"}
+        }
+    }
+
+
+def mapping_upstage():
+    return {
+        "properties": {
+            "docid": {"type": "keyword"},
+            "content": {"type": "text", "analyzer": "nori"},
+            "embeddings_upstage": {"type": "dense_vector", "dims": 4096, "index": True, "similarity": "l2_norm"}
+        }
+    }
+
+
+def mapping_sbert():
+    return {
+        "properties": {
+            "docid": {"type": "keyword"},
+            "content": {"type": "text", "analyzer": "nori"},
+            "embeddings_sbert": {"type": "dense_vector", "dims": 768, "index": True, "similarity": "l2_norm"}
+        }
+    }
+
+
+def mapping_gemini():
+    return {
+        "properties": {
+            "docid": {"type": "keyword"},
+            "content": {"type": "text", "analyzer": "nori"},
+            "embeddings_gemini": {"type": "dense_vector", "dims": 3072, "index": True, "similarity": "l2_norm"}
+        }
+    }
+
+
+def ensure_or_recreate_index_backend(es, index_name, settings, mappings, recreate):
+    """백엔드 전용 인덱스 보장: 존재하지 않거나 비어있으면 재생성. recreate=True면 무조건 재생성."""
+    log = logging.getLogger(__name__)
+    if es.indices.exists(index=index_name):
+        if recreate:
+            log.info(f"[index] force_recreate=True → 재생성: {index_name}")
+            es.indices.delete(index=index_name)
+            es.indices.create(index=index_name, settings=settings, mappings=mappings)
+            return True  # recreated
+        else:
+            # 존재하지만 문서가 0이면 재생성
+            try:
+                cnt = es.count(index=index_name).get("count", 0)
+            except Exception:
+                cnt = 0
+            if cnt == 0:
+                log.warning(f"[index] 기존 인덱스가 비어있음(count=0) → 재생성: {index_name}")
+                es.indices.delete(index=index_name)
+                es.indices.create(index=index_name, settings=settings, mappings=mappings)
+                return True
+            # 그대로 사용
+            return False
+    else:
+        log.info(f"[index] 존재하지 않음 → 생성: {index_name}")
+        es.indices.create(index=index_name, settings=settings, mappings=mappings)
+        return True
+
+
+def index_documents_sparse(es, index_name, docs):
+    actions = [{'_index': index_name, '_source': {"docid": d.get("docid"), "content": d.get("content", "")}} for d in docs]
+    return helpers.bulk(es, actions, request_timeout=120, max_retries=3, initial_backoff=2, max_backoff=60)
+
+
+def index_documents_upstage(es, index_name, docs, solar_model, batch_size=100):
+    embeds = get_embeddings_in_batches(docs, solar_model, batch_size)
+    actions = []
+    for idx, d in enumerate(docs):
+        vec = embeds[idx]
+        if hasattr(vec, 'tolist'):
+            vec = vec.tolist()
+        actions.append({'_index': index_name, '_source': {"docid": d.get("docid"), "content": d.get("content", ""), "embeddings_upstage": vec}})
+    return helpers.bulk(es, actions, request_timeout=120, max_retries=3, initial_backoff=2, max_backoff=60)
+
+
+def index_documents_sbert(es, index_name, docs, sbert_model, batch_size=100):
+    embeds = []
+    for i in range(0, len(docs), batch_size):
+        contents = [d.get("content", "") for d in docs[i:i+batch_size]]
+        part = sbert_get_embedding(contents, sbert_model)
+        embeds.extend(part)
+    actions = []
+    for idx, d in enumerate(docs):
+        vec = embeds[idx]
+        if hasattr(vec, 'tolist'):
+            vec = vec.tolist()
+        actions.append({'_index': index_name, '_source': {"docid": d.get("docid"), "content": d.get("content", ""), "embeddings_sbert": vec}})
+    return helpers.bulk(es, actions, request_timeout=120, max_retries=3, initial_backoff=2, max_backoff=60)
+
+
+def index_documents_gemini(es, index_name, docs, cfg):
+    """
+    Gemini 임베딩은 API 호출 대신 미리 생성된 파일을 사용한다.
+    code/rag_with_hydra_reranker/gemini_embedding_generator.py 가 생성한 결과를 로드한다.
+    """
+    log = logging.getLogger(__name__)
+    try:
+        from gemini_embedding_generator import GeminiEmbeddingGenerator
+    except Exception as e:
+        raise RuntimeError("GeminiEmbeddingGenerator 모듈을 임포트할 수 없습니다. 사전 임베딩 생성 파이프라인을 먼저 실행하세요.") from e
+
+    generator = GeminiEmbeddingGenerator(cfg)
+    gemini_embeds = generator.get_all_embeddings()
+    if gemini_embeds is None:
+        raise RuntimeError("Gemini 임베딩이 없습니다. 먼저 `uv run python code/rag_with_hydra_reranker/gemini_embedding_generator.py` 를 실행하세요.")
+    # numpy 배열/리스트 모두에서 안전하게 빈 여부 판정
+    is_empty = False
+    if hasattr(gemini_embeds, 'size'):
+        try:
+            is_empty = (gemini_embeds.size == 0)
+        except Exception:
+            is_empty = False
+    else:
+        try:
+            is_empty = (len(gemini_embeds) == 0)
+        except Exception:
+            is_empty = False
+    if is_empty:
+        raise RuntimeError("Gemini 임베딩이 비어있습니다. 먼저 `uv run python code/rag_with_hydra_reranker/gemini_embedding_generator.py` 를 실행해 임베딩 파일을 생성하세요.")
+
+    if len(gemini_embeds) != len(docs):
+        log.warning(f"Gemini 임베딩 개수({len(gemini_embeds)})와 문서 수({len(docs)})가 다릅니다. 최소 길이에 맞춰 색인합니다.")
+    n = min(len(gemini_embeds), len(docs))
+
+    actions = []
+    for idx in range(n):
+        d = docs[idx]
+        vec = gemini_embeds[idx]
+        if hasattr(vec, 'tolist'):
+            vec = vec.tolist()
+        actions.append({'_index': index_name, '_source': {"docid": d.get("docid"), "content": d.get("content", ""), "embeddings_gemini": vec}})
+    return helpers.bulk(es, actions, request_timeout=120, max_retries=3, initial_backoff=2, max_backoff=60)
+
+
 # 역색인을 이용한 검색
 def sparse_retrieve(es, index_name, query_str, size):
     query = {
@@ -857,7 +1029,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             gemini_docids = []
             gemini_hyde_docids = []
             if sparse_enabled:
-                sparse_result = sparse_retrieve(es, index_name, standalone_query, cfg.retrieve.sparse.top_k)
+                sparse_result = sparse_retrieve(es, cfg.index.sparse.name, standalone_query, cfg.retrieve.sparse.top_k)
                 sparse_retrieved = len(sparse_result['hits']['hits'])
                 for rst in sparse_result['hits']['hits']:
                     src = rst.get("_source", {})
@@ -878,7 +1050,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             if upstage_enabled and dense_ctx and dense_ctx.get('upstage'):
                 du = dense_ctx['upstage']
                 dense_result = dense_retrieve_upstage(
-                    es, du.get('model'), index_name, standalone_query,
+                    es, du.get('model'), cfg.index.upstage.name, standalone_query,
                     cfg.retrieve.dense_upstage.top_k, cfg.retrieve.dense_upstage.num_candidates
                 )
                 upstage_retrieved = len(dense_result['hits']['hits'])
@@ -900,7 +1072,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             if sbert_enabled and dense_ctx and dense_ctx.get('sbert'):
                 ds = dense_ctx['sbert']
                 dense_result = dense_retrieve_sbert(
-                    es, ds.get('model'), index_name, standalone_query,
+                    es, ds.get('model'), cfg.index.sbert.name, standalone_query,
                     cfg.retrieve.dense_sbert.top_k, cfg.retrieve.dense_sbert.num_candidates
                 )
                 sbert_retrieved = len(dense_result['hits']['hits'])
@@ -923,7 +1095,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             if upstage_hyde_enabled and dense_ctx and dense_ctx.get('upstage_hyde'):
                 duh = dense_ctx['upstage_hyde']
                 dense_result = dense_retrieve_upstage_hyde(
-                    es, duh.get('model'), index_name, standalone_query,
+                    es, duh.get('model'), cfg.index.upstage.name, standalone_query,
                     cfg.retrieve.dense_upstage_hyde.top_k, cfg.retrieve.dense_upstage_hyde.num_candidates,
                     client, cfg
                 )
@@ -948,7 +1120,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             if gemini_enabled and dense_ctx and dense_ctx.get('gemini'):
                 dg = dense_ctx['gemini']
                 dense_result = dense_retrieve_gemini(
-                    es, dg.get('model'), index_name, standalone_query,
+                    es, dg.get('model'), cfg.index.gemini.name, standalone_query,
                     cfg.retrieve.dense_gemini.top_k, cfg.retrieve.dense_gemini.num_candidates
                 )
                 gemini_retrieved = len(dense_result['hits']['hits'])
@@ -972,7 +1144,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             if gemini_hyde_enabled and dense_ctx and dense_ctx.get('gemini_hyde'):
                 dgh = dense_ctx['gemini_hyde']
                 dense_result = dense_retrieve_gemini_hyde(
-                    es, dgh.get('model'), index_name, standalone_query,
+                    es, dgh.get('model'), cfg.index.gemini.name, standalone_query,
                     cfg.retrieve.dense_gemini_hyde.top_k, cfg.retrieve.dense_gemini_hyde.num_candidates,
                     client, cfg
                 )
@@ -1144,6 +1316,7 @@ def main(cfg: DictConfig) -> None:
     upstage_hyde_enabled = getattr(cfg.retrieve.dense_upstage_hyde, 'enabled', False)
     gemini_enabled = getattr(cfg.retrieve.dense_gemini, 'enabled', False)
     gemini_hyde_enabled = getattr(cfg.retrieve.dense_gemini_hyde, 'enabled', False)
+    sparse_enabled = getattr(cfg.retrieve.sparse, 'enabled', True)
 
     # 백엔드별 모델 초기화 (활성화된 경우에만)
     # upstage 또는 upstage_hyde가 활성화된 경우 solar_model 필요
@@ -1162,152 +1335,58 @@ def main(cfg: DictConfig) -> None:
         )
         log.info(f"Gemini 임베딩 모델 초기화: {cfg.retrieve.dense_gemini.model_name}")
 
-    # Elasticsearch 인덱스 설정
-    # Elasticsearch 9.x에서는 Nori의 품사 태그가 세분화되어
-    # 기존의 "E", "J" 등의 대분류 태그가 허용되지 않습니다.
-    # 아래는 동일 의미의 세분화된 태그로 교체한 목록입니다.
-    # - E(어미): EC, EF, EP, ETN, ETM
-    # - J(조사): JKS, JKC, JKG, JKO, JKB, JKV, JKQ, JX, JC
-    # - 기호/구두점: SC, SE, SF, SP, SSO, SSC, SY
-    # - 보조 용언/계사: VCP, VCN, VX
-    settings = {
-        "analysis": {
-            "analyzer": {
-                "nori": {
-                    "type": "custom",
-                    "tokenizer": "nori_tokenizer",
-                    "decompound_mode": "mixed",
-                    "filter": ["nori_posfilter"]
-                }
-            },
-            "filter": {
-                "nori_posfilter": {
-                    "type": "nori_part_of_speech",
-                    "stoptags": [
-                        # E (어미)
-                        "EC", "EF", "EP", "ETN", "ETM",
-                        # J (조사)
-                        "JKS", "JKC", "JKG", "JKO", "JKB", "JKV", "JKQ", "JX", "JC",
-                        # 기호/구두점
-                        "SC", "SE", "SF", "SP", "SSO", "SSC", "SY",
-                        # 보조 용언/계사
-                        "VCP", "VCN", "VX"
-                    ]
-                }
-            }
-        }
-    }
+    # =========
+    # 인덱스 분리 관리: 활성화된 방식만 재생성
+    # =========
+    settings = build_nori_settings()
+    force_recreate = bool(getattr(cfg.index, 'force_recreate', False))
 
-    # 활성화된 dense retrieve 방식에 따라 매핑 동적 생성
-    mappings = {
-        "properties": {
-            "content": {"type": "text", "analyzer": "nori"}
-        }
-    }
+    # 문서 로드(한 번만)
+    with open(cfg.paths.documents) as f:
+        docs = [json.loads(line) for line in f]
 
-    # Upstage 임베딩이 활성화된 경우에만 필드 추가 (일반 upstage 또는 hyde 방식 모두 동일한 필드 사용)
+    # Sparse
+    if sparse_enabled:
+        recreate = force_recreate  # 활성화된 방식만 재생성
+        created = ensure_or_recreate_index_backend(es, cfg.index.sparse.name, settings, mapping_sparse(), recreate)
+        if created:
+            log.info(f"[sparse] 인덱스 생성/재생성: {cfg.index.sparse.name}")
+            index_documents_sparse(es, cfg.index.sparse.name, docs)
+            log.info(f"[sparse] 색인 완료: {len(docs)}건")
+
+    # Upstage
     if upstage_enabled or upstage_hyde_enabled:
-        mappings["properties"]["embeddings_upstage"] = {
-            "type": "dense_vector",
-            "dims": 4096,
-            "index": True,
-            "similarity": "l2_norm"
-        }
+        recreate = force_recreate
+        created = ensure_or_recreate_index_backend(es, cfg.index.upstage.name, settings, mapping_upstage(), recreate)
+        if created:
+            log.info(f"[upstage] 인덱스 생성/재생성: {cfg.index.upstage.name}")
+            if solar_model is None:
+                raise ValueError("Upstage 임베딩 모델이 초기화되지 않았습니다.")
+            index_documents_upstage(es, cfg.index.upstage.name, docs, solar_model, cfg.embedding.batch_size)
+            log.info(f"[upstage] 색인 완료: {len(docs)}건")
 
-    # SBERT 임베딩이 활성화된 경우에만 필드 추가
+    # SBERT
     if sbert_enabled:
-        mappings["properties"]["embeddings_sbert"] = {
-            "type": "dense_vector",
-            "dims": 768,
-            "index": True,
-            "similarity": "l2_norm"
-        }
+        recreate = force_recreate
+        created = ensure_or_recreate_index_backend(es, cfg.index.sbert.name, settings, mapping_sbert(), recreate)
+        if created:
+            log.info(f"[sbert] 인덱스 생성/재생성: {cfg.index.sbert.name}")
+            if sbert_model is None:
+                raise ValueError("SBERT 임베딩 모델이 초기화되지 않았습니다.")
+            index_documents_sbert(es, cfg.index.sbert.name, docs, sbert_model, cfg.embedding.batch_size)
+            log.info(f"[sbert] 색인 완료: {len(docs)}건")
 
-    # Gemini 임베딩이 활성화된 경우에만 필드 추가 (3072차원)
+    # Gemini
     if gemini_enabled or gemini_hyde_enabled:
-        mappings["properties"]["embeddings_gemini"] = {
-            "type": "dense_vector",
-            "dims": 3072,
-            "index": True,
-            "similarity": "l2_norm"
-        }
-
-    # 인덱스 생성 또는 재사용
-    force_recreate = getattr(cfg.index, 'force_recreate', True)
-    index_exists = es.indices.exists(index=cfg.index.name)
-    create_es_index(es, cfg.index.name, settings, mappings, force_recreate)
-
-    # 인덱스가 이미 존재하고 force_recreate가 False면 임베딩 및 색인 건너뛰기
-    if index_exists and not force_recreate:
-        log.info(f'기존 인덱스 "{cfg.index.name}" 재사용 - 임베딩 및 색인 과정 건너뜀')
-    else:
-        # 문서 임베딩 생성 및 인덱싱
-        index_docs = []
-        with open(cfg.paths.documents) as f:
-            docs = [json.loads(line) for line in f]
-
-        # Upstage(4096 차원 그대로 사용) - 일반 upstage 또는 hyde 방식 모두 동일한 임베딩 사용
-        solar_embeds = None
-        if (upstage_enabled or upstage_hyde_enabled) and solar_model is not None:
-            solar_embeds = get_embeddings_in_batches(docs, solar_model, cfg.embedding.batch_size)
-
-        # SBERT(768)
-        sbert_embeds = None
-        if sbert_enabled and sbert_model is not None:
-            sbert_embeds = []
-            bs = cfg.embedding.batch_size
-            for i in range(0, len(docs), bs):
-                batch = docs[i:i+bs]
-                contents = [d["content"] for d in batch]
-                sbert_embeds.extend(sbert_get_embedding(contents, sbert_model))
-
-        # Gemini(3072) - 별도 스크립트로 생성된 임베딩 로드
-        gemini_embeds = None
-        if (gemini_enabled or gemini_hyde_enabled) and gemini_model is not None:
+        recreate = force_recreate
+        created = ensure_or_recreate_index_backend(es, cfg.index.gemini.name, settings, mapping_gemini(), recreate)
+        if created:
+            log.info(f"[gemini] 인덱스 생성/재생성: {cfg.index.gemini.name}")
             try:
-                from gemini_embedding_generator import GeminiEmbeddingGenerator
-                generator = GeminiEmbeddingGenerator(cfg)
-                gemini_embeds = generator.get_all_embeddings()
-
-                if gemini_embeds is None:
-                    log.warning("Gemini 임베딩이 없습니다. 다음 명령을 먼저 실행하세요:")
-                    log.warning("python gemini_embedding_generator.py")
-                    log.warning("Gemini 임베딩 없이 계속 진행합니다...")
-                    # Gemini 기능 비활성화
-                    gemini_enabled = False
-                    gemini_hyde_enabled = False
-                else:
-                    log.info(f"Gemini 임베딩 로드 완료: {len(gemini_embeds)}개")
+                index_documents_gemini(es, cfg.index.gemini.name, docs, cfg)
+                log.info(f"[gemini] 색인 완료: {len(docs)}건")
             except Exception as e:
-                log.error(f"Gemini 임베딩 로드 실패: {e}")
-                log.warning("Gemini 임베딩 없이 계속 진행합니다...")
-                gemini_enabled = False
-                gemini_hyde_enabled = False
-                gemini_embeds = None
-
-        # 문서에 필요한 필드만 추가하여 색인
-        for idx, doc in enumerate(docs):
-            if solar_embeds is not None:
-                vec = solar_embeds[idx]
-                if hasattr(vec, 'tolist'):
-                    vec = vec.tolist()
-                doc["embeddings_upstage"] = vec
-            if sbert_embeds is not None:
-                vec = sbert_embeds[idx]
-                if hasattr(vec, 'tolist'):
-                    vec = vec.tolist()
-                doc["embeddings_sbert"] = vec
-            if gemini_embeds is not None:
-                vec = gemini_embeds[idx]
-                if hasattr(vec, 'tolist'):
-                    vec = vec.tolist()
-                doc["embeddings_gemini"] = vec
-            index_docs.append(doc)
-
-        ret = bulk_add(es, cfg.index.name, index_docs)
-        log.info(f'Bulk indexing completed: {ret}')
-
-        # 색인 완료 후 불필요한 대용량 메모리 해제 (리랭킹 모델 로드 전 OOM 방지)
+                log.error(f"[gemini] 색인 실패: {e}")
         import gc
         log.info('색인 완료 - 불필요한 메모리 해제 시작')
 
@@ -1348,7 +1427,8 @@ def main(cfg: DictConfig) -> None:
         'gemini': {'model': gemini_model} if gemini_enabled and gemini_model is not None else None,
         'gemini_hyde': {'model': gemini_model} if gemini_hyde_enabled and gemini_model is not None else None,
     }
-    eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.name, dense_ctx)
+    # 평가 실행(이제 index_name은 사용하지 않지만 인터페이스 호환상 전달)
+    eval_rag(cfg.paths.eval_data, output_path, client, cfg, es, cfg.index.sparse.name, dense_ctx)
     log.info('RAG evaluation process completed')
 
 

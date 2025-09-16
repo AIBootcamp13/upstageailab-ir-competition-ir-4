@@ -101,8 +101,15 @@ logging:
 
 # 인덱스 설정
 index:
-  name: "test"
-  force_recreate: false  # false면 기존 인덱스 재사용, true면 삭제 후 재생성
+  force_recreate: false  # true면 활성화된 방식의 인덱스만 재생성
+  sparse:
+    name: "index_sparse"
+  upstage:
+    name: "index_upstage"
+  sbert:
+    name: "index_sbert"
+  gemini:
+    name: "index_gemini"
 
 # Elasticsearch 설정
 elasticsearch:
