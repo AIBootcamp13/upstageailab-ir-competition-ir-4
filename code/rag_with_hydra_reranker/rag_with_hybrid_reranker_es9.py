@@ -334,10 +334,24 @@ def sparse_retrieve(es, index_name, query_str, size):
 
 
 # Vector 유사도를 이용한 검색 (backend별)
-def dense_retrieve_upstage(es, model, index_name, query_str, size, num_candidates=100):
+def dense_retrieve_upstage(es, model, index_name, query_str, size, num_candidates=100, cfg=None):
     log = logging.getLogger(__name__)
-    # 쿼리 임베딩 (4096차원)
-    query_embedding = upstage_get_embedding([query_str], model, is_query=True)
+    # 쿼리 임베딩 (4096차원) - Query Embedding 캐시 적용
+    if cfg and getattr(getattr(cfg, 'query_embedding', {}), 'cache', {}).get('enabled', False):
+        cache_dir = cfg.query_embedding.cache.dir
+        model_name = cfg.retrieve.dense_upstage.model_name
+        key = make_qe_key('upstage', model_name, 'query', query_str)
+        cached = qe_get(cache_dir, 'upstage', model_name, key)
+        if cached is not None:
+            log.info(f"Query Embedding 캐시 적중 provider=upstage model={model_name} key={key[:10]}")
+            query_embedding = cached
+        else:
+            log.info(f"Query Embedding 캐시 미스 provider=upstage model={model_name} key={key[:10]}")
+            query_embedding = upstage_get_embedding([query_str], model, is_query=True)
+            qe_set(cache_dir, 'upstage', model_name, key, query_embedding)
+            log.info(f"Query Embedding 캐시 저장 provider=upstage model={model_name} key={key[:10]}")
+    else:
+        query_embedding = upstage_get_embedding([query_str], model, is_query=True)
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
 
@@ -356,9 +370,23 @@ def dense_retrieve_upstage(es, model, index_name, query_str, size, num_candidate
     # top-level size로 최종 반환 개수 지정
     return es.search(index=index_name, knn=knn, size=size)
 
-def dense_retrieve_sbert(es, model, index_name, query_str, size, num_candidates=100):
+def dense_retrieve_sbert(es, model, index_name, query_str, size, num_candidates=100, cfg=None):
     log = logging.getLogger(__name__)
-    query_embedding = sbert_get_embedding([query_str], model)[0]
+    if cfg and getattr(getattr(cfg, 'query_embedding', {}), 'cache', {}).get('enabled', False):
+        cache_dir = cfg.query_embedding.cache.dir
+        model_name = cfg.retrieve.dense_sbert.model_name
+        key = make_qe_key('sbert', model_name, 'query', query_str)
+        cached = qe_get(cache_dir, 'sbert', model_name, key)
+        if cached is not None:
+            log.info(f"Query Embedding 캐시 적중 provider=sbert model={model_name} key={key[:10]}")
+            query_embedding = cached
+        else:
+            log.info(f"Query Embedding 캐시 미스 provider=sbert model={model_name} key={key[:10]}")
+            query_embedding = sbert_get_embedding([query_str], model)[0]
+            qe_set(cache_dir, 'sbert', model_name, key, query_embedding)
+            log.info(f"Query Embedding 캐시 저장 provider=sbert model={model_name} key={key[:10]}")
+    else:
+        query_embedding = sbert_get_embedding([query_str], model)[0]
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
 
@@ -432,9 +460,24 @@ def dense_retrieve_upstage_hyde(es, model, index_name, query_str, size, num_cand
     # 1단계: 가상 문서 생성
     hypothetical_doc = generate_hypothetical_document(query_str, client, cfg)
 
-    # 2단계: 가상 문서를 임베딩하여 검색 (기존 dense_retrieve_upstage와 동일)
     log = logging.getLogger(__name__)
-    query_embedding = upstage_get_embedding([hypothetical_doc], model, is_query=True)
+    # 2단계: 가상 문서를 임베딩하여 검색
+    if getattr(getattr(cfg, 'query_embedding', {}), 'cache', {}).get('enabled', False):
+        cache_dir = cfg.query_embedding.cache.dir
+        model_name = cfg.retrieve.dense_upstage.model_name
+        key = make_qe_key('upstage', model_name, 'query', hypothetical_doc)
+        cached = qe_get(cache_dir, 'upstage', model_name, key)
+        if cached is not None:
+            log.info(f"Query Embedding 캐시 적중 provider=upstage model={model_name} key={key[:10]}")
+            query_embedding = cached
+        else:
+            log.info(f"Query Embedding 캐시 미스 provider=upstage model={model_name} key={key[:10]}")
+            query_embedding = upstage_get_embedding([hypothetical_doc], model, is_query=True)
+            qe_set(cache_dir, 'upstage', model_name, key, query_embedding)
+            log.info(f"Query Embedding 캐시 저장 provider=upstage model={model_name} key={key[:10]}")
+    else:
+        query_embedding = upstage_get_embedding([hypothetical_doc], model, is_query=True)
+
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
 
@@ -453,11 +496,25 @@ def dense_retrieve_upstage_hyde(es, model, index_name, query_str, size, num_cand
     return es.search(index=index_name, knn=knn, size=size)
 
 # Gemini Vector 유사도를 이용한 검색
-def dense_retrieve_gemini(es, model, index_name, query_str, size, num_candidates=100):
+def dense_retrieve_gemini(es, model, index_name, query_str, size, num_candidates=100, cfg=None):
     """Gemini 임베딩을 사용한 dense retrieve"""
     # 쿼리 임베딩 (3072차원)
     log = logging.getLogger(__name__)
-    query_embedding = gemini_get_embedding([query_str], model, is_query=True)
+    if cfg and getattr(getattr(cfg, 'query_embedding', {}), 'cache', {}).get('enabled', False):
+        cache_dir = cfg.query_embedding.cache.dir
+        model_name = cfg.retrieve.dense_gemini.model_name
+        key = make_qe_key('gemini', model_name, 'query', query_str)
+        cached = qe_get(cache_dir, 'gemini', model_name, key)
+        if cached is not None:
+            log.info(f"Query Embedding 캐시 적중 provider=gemini model={model_name} key={key[:10]}")
+            query_embedding = cached
+        else:
+            log.info(f"Query Embedding 캐시 미스 provider=gemini model={model_name} key={key[:10]}")
+            query_embedding = gemini_get_embedding([query_str], model, is_query=True)
+            qe_set(cache_dir, 'gemini', model_name, key, query_embedding)
+            log.info(f"Query Embedding 캐시 저장 provider=gemini model={model_name} key={key[:10]}")
+    else:
+        query_embedding = gemini_get_embedding([query_str], model, is_query=True)
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
 
@@ -478,16 +535,27 @@ def dense_retrieve_gemini(es, model, index_name, query_str, size, num_candidates
 # HyDE 기법을 활용한 Gemini Dense Retrieve
 def dense_retrieve_gemini_hyde(es, model, index_name, query_str, size, num_candidates, client, cfg):
     """HyDE 기법: 질의 -> 가상문서 생성 -> Gemini 임베딩 -> 검색"""
-    # 1단계: 가상 문서 생성
     hypothetical_doc = generate_hypothetical_document(query_str, client, cfg)
-
-    # 2단계: 가상 문서를 Gemini 임베딩하여 검색
     log = logging.getLogger(__name__)
-    query_embedding = gemini_get_embedding([hypothetical_doc], model, is_query=True)
+    if getattr(getattr(cfg, 'query_embedding', {}), 'cache', {}).get('enabled', False):
+        cache_dir = cfg.query_embedding.cache.dir
+        model_name = cfg.retrieve.dense_gemini.model_name
+        key = make_qe_key('gemini', model_name, 'query', hypothetical_doc)
+        cached = qe_get(cache_dir, 'gemini', model_name, key)
+        if cached is not None:
+            log.info(f"Query Embedding 캐시 적중 provider=gemini model={model_name} key={key[:10]}")
+            query_embedding = cached
+        else:
+            log.info(f"Query Embedding 캐시 미스 provider=gemini model={model_name} key={key[:10]}")
+            query_embedding = gemini_get_embedding([hypothetical_doc], model, is_query=True)
+            qe_set(cache_dir, 'gemini', model_name, key, query_embedding)
+            log.info(f"Query Embedding 캐시 저장 provider=gemini model={model_name} key={key[:10]}")
+    else:
+        query_embedding = gemini_get_embedding([hypothetical_doc], model, is_query=True)
+
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
 
-    # num_candidates 보정
     orig_num_cand = num_candidates
     if num_candidates < size:
         num_candidates = size
@@ -686,6 +754,11 @@ from google.genai import types
 import traceback
 import time
 from utils.llm_cache import make_key, get_cache_entry, set_cache_entry
+from utils.query_embedding_cache import (
+    make_key as make_qe_key,
+    get_cache_entry as qe_get,
+    set_cache_entry as qe_set,
+)
 
 # OpenAI 및 Gemini 클라이언트 생성 함수
 def create_llm_client(cfg):
@@ -1051,7 +1124,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                 du = dense_ctx['upstage']
                 dense_result = dense_retrieve_upstage(
                     es, du.get('model'), cfg.index.upstage.name, standalone_query,
-                    cfg.retrieve.dense_upstage.top_k, cfg.retrieve.dense_upstage.num_candidates
+                    cfg.retrieve.dense_upstage.top_k, cfg.retrieve.dense_upstage.num_candidates, cfg
                 )
                 upstage_retrieved = len(dense_result['hits']['hits'])
                 for rst in dense_result['hits']['hits']:
@@ -1073,7 +1146,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                 ds = dense_ctx['sbert']
                 dense_result = dense_retrieve_sbert(
                     es, ds.get('model'), cfg.index.sbert.name, standalone_query,
-                    cfg.retrieve.dense_sbert.top_k, cfg.retrieve.dense_sbert.num_candidates
+                    cfg.retrieve.dense_sbert.top_k, cfg.retrieve.dense_sbert.num_candidates, cfg
                 )
                 sbert_retrieved = len(dense_result['hits']['hits'])
                 for rst in dense_result['hits']['hits']:
@@ -1121,7 +1194,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                 dg = dense_ctx['gemini']
                 dense_result = dense_retrieve_gemini(
                     es, dg.get('model'), cfg.index.gemini.name, standalone_query,
-                    cfg.retrieve.dense_gemini.top_k, cfg.retrieve.dense_gemini.num_candidates
+                    cfg.retrieve.dense_gemini.top_k, cfg.retrieve.dense_gemini.num_candidates, cfg
                 )
                 gemini_retrieved = len(dense_result['hits']['hits'])
                 for rst in dense_result['hits']['hits']:
