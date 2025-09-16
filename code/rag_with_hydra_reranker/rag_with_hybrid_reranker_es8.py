@@ -317,14 +317,14 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
     msg = [{"role": "system", "content": cfg.prompts.function_calling}] + messages
     try:
         result = client.chat.completions.create(
-            model=cfg.model.name,
+            model=cfg.llm.model,
             messages=msg,
             tools=get_tools(cfg),
             #tool_choice={"type": "function", "function": {"name": "search"}},
-            temperature=cfg.model.temperature,
-            seed=cfg.model.seed,
-            timeout=cfg.model.timeout,
-            reasoning_effort=cfg.model.reasoning_effort
+            temperature=cfg.llm.temperature,
+            seed=cfg.llm.seed,
+            timeout=cfg.llm.timeout,
+            reasoning_effort=cfg.llm.reasoning_effort
         )
     except Exception:
         traceback.print_exc()
@@ -416,11 +416,11 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             msg = [{"role": "system", "content": cfg.prompts.qa}] + messages
             try:
                 qaresult = client.chat.completions.create(
-                        model=cfg.model.name,
+                        model=cfg.llm.model,
                         messages=msg,
-                        temperature=cfg.model.temperature,
-                        seed=cfg.model.seed,
-                        timeout=cfg.model.qa_timeout
+                        temperature=cfg.llm.temperature,
+                        seed=cfg.llm.seed,
+                        timeout=getattr(cfg.llm, 'qa_timeout', getattr(cfg.llm, 'timeout', None))
                     )
             except Exception:
                 traceback.print_exc()

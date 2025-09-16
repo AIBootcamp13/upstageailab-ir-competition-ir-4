@@ -63,13 +63,13 @@ def check_search_decision(messages, client, cfg):
 
     try:
         result = client.chat.completions.create(
-            model=cfg.model.name,  # config에서 모델 이름 사용
+            model=cfg.llm.model,  # config에서 모델 이름 사용
             messages=msg,
             tools=get_tools(cfg),
-            temperature=cfg.model.temperature,
-            seed=cfg.model.seed,
-            timeout=cfg.model.timeout,
-            reasoning_effort=cfg.model.reasoning_effort
+            temperature=cfg.llm.temperature,
+            seed=cfg.llm.seed,
+            timeout=cfg.llm.timeout,
+            reasoning_effort=cfg.llm.reasoning_effort
         )
 
         # LLM 답변 내용 캡처

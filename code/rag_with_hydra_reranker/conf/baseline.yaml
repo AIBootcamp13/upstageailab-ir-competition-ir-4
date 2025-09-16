@@ -1,6 +1,6 @@
-# 모델 설정
-model:
-  name: "solar-pro2"
+# LLM 설정
+llm:
+  model: "solar-pro2"
   temperature: 0
   seed: 1
   timeout: 10

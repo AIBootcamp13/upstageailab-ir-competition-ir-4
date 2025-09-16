@@ -518,7 +518,7 @@ import time
 def create_llm_client(cfg):
     """설정에 따라 LLM 클라이언트 생성 (OpenAI 또는 Gemini)"""
     log = logging.getLogger(__name__)
-    model_name = cfg.model.name
+    model_name = cfg.llm.model
 
     # Gemini 모델인지 확인
     if "gemini" in model_name.lower():
@@ -544,7 +544,7 @@ def create_llm_client(cfg):
 
 def apply_llm_delay(cfg):
     """설정된 시간만큼 대기 (rate limit 회피)"""
-    delay_seconds = getattr(cfg.model, 'delay_seconds', 0)
+    delay_seconds = getattr(cfg.llm, 'delay_seconds', 0)
     if delay_seconds > 0:
         log = logging.getLogger(__name__)
         log.debug(f"LLM 호출 대기: {delay_seconds}초")
@@ -553,7 +553,7 @@ def apply_llm_delay(cfg):
 def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
     """OpenAI/Gemini 통합 LLM 호출 함수"""
     log = logging.getLogger(__name__)
-    model_name = cfg.model.name
+    model_name = cfg.llm.model
 
     # rate limit 회피를 위한 대기
     apply_llm_delay(cfg)
@@ -561,8 +561,8 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
     # Gemini 클라이언트인지 확인 (더 정확한 타입 체크)
     if isinstance(client, genai.Client):  # genai.Client
         # 재시도 설정값 로드 (기본값: 최대 5회, 30초 대기)
-        retry_max = int(getattr(cfg.model, 'retry_max', 5) or 5)
-        retry_delay = int(getattr(cfg.model, 'retry_delay_seconds', 30) or 30)
+        retry_max = int(getattr(cfg.llm, 'retry_max', 5) or 5)
+        retry_delay = int(getattr(cfg.llm, 'retry_delay_seconds', 30) or 30)
 
         # OpenAI 메시지 형식을 Gemini types.Content 형식으로 변환
         contents = []
@@ -594,7 +594,7 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
                     gemini_tools.append(types.Tool(function_declarations=[gemini_func]))
 
         config = types.GenerateContentConfig(
-            temperature=cfg.model.temperature,
+            temperature=cfg.llm.temperature,
             tools=gemini_tools if gemini_tools else None,
         )
 
@@ -688,14 +688,14 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
         params = {
             "model": model_name,
             "messages": messages,
-            "temperature": cfg.model.temperature,
-            "seed": cfg.model.seed,
-            "timeout": cfg.model.timeout
+            "temperature": cfg.llm.temperature,
+            "seed": cfg.llm.seed,
+            "timeout": cfg.llm.timeout
         }
 
         # reasoning_effort 지원 (o3 계열 등)
-        if hasattr(cfg.model, 'reasoning_effort') and getattr(cfg.model, 'reasoning_effort'):
-            params["reasoning_effort"] = cfg.model.reasoning_effort
+        if hasattr(cfg.llm, 'reasoning_effort') and getattr(cfg.llm, 'reasoning_effort'):
+            params["reasoning_effort"] = cfg.llm.reasoning_effort
 
         if tools:
             params["tools"] = tools
@@ -1062,7 +1062,7 @@ def main(cfg: DictConfig) -> None:
     log.info("Starting RAG evaluation process")
     
     # LLM API 키 환경변수 확인 (모델에 따라)
-    model_name = cfg.model.name.lower()
+    model_name = cfg.llm.model.lower()
     if "gemini" in model_name:
         if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
             raise ValueError("Gemini 모델 사용시 GEMINI_API_KEY 또는 GOOGLE_API_KEY environment variable is required")
