@@ -370,20 +370,17 @@ def dense_retrieve_upstage(es, model, index_name, query_str, size, num_candidate
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
 
-    # num_candidates 보정 (k <= num_candidates 유지)
-    orig_num_cand = num_candidates
-    if num_candidates < size:
-        num_candidates = size
-        log.warning(f"[Upstage] num_candidates({orig_num_cand}) < k/size({size}) → num_candidates={num_candidates}로 보정")
-
-    knn = {
-        "field": "embeddings_upstage",
-        "query_vector": query_embedding,
-        "k": size,
-        "num_candidates": num_candidates
-    }
-    # top-level size로 최종 반환 개수 지정
-    return es.search(index=index_name, knn=knn, size=size)
+    # 공통 dense 검색 실행(ANN/Exact 자동 분기)
+    return _dense_search(
+        es=es,
+        index_name=index_name,
+        vector_field="embeddings_upstage",
+        query_vector=query_embedding,
+        size=size,
+        num_candidates=num_candidates,
+        cfg=cfg,
+        log=log,
+    )
 
 def dense_retrieve_sbert(es, model, index_name, query_str, size, num_candidates=100, cfg=None):
     log = logging.getLogger(__name__)
@@ -405,19 +402,16 @@ def dense_retrieve_sbert(es, model, index_name, query_str, size, num_candidates=
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
 
-    # num_candidates 보정
-    orig_num_cand = num_candidates
-    if num_candidates < size:
-        num_candidates = size
-        log.warning(f"[SBERT] num_candidates({orig_num_cand}) < k/size({size}) → num_candidates={num_candidates}로 보정")
-
-    knn = {
-        "field": "embeddings_sbert",
-        "query_vector": query_embedding,
-        "k": size,
-        "num_candidates": num_candidates
-    }
-    return es.search(index=index_name, knn=knn, size=size)
+    return _dense_search(
+        es=es,
+        index_name=index_name,
+        vector_field="embeddings_sbert",
+        query_vector=query_embedding,
+        size=size,
+        num_candidates=num_candidates,
+        cfg=cfg,
+        log=log,
+    )
 
 # HyDE 캐시 (간단한 메모리 캐시)
 _hyde_cache = {}
@@ -496,19 +490,16 @@ def dense_retrieve_upstage_hyde(es, model, index_name, query_str, size, num_cand
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
 
-    # num_candidates 보정
-    orig_num_cand = num_candidates
-    if num_candidates < size:
-        num_candidates = size
-        log.warning(f"[Upstage-HyDE] num_candidates({orig_num_cand}) < k/size({size}) → num_candidates={num_candidates}로 보정")
-
-    knn = {
-        "field": "embeddings_upstage",
-        "query_vector": query_embedding,
-        "k": size,
-        "num_candidates": num_candidates
-    }
-    return es.search(index=index_name, knn=knn, size=size)
+    return _dense_search(
+        es=es,
+        index_name=index_name,
+        vector_field="embeddings_upstage",
+        query_vector=query_embedding,
+        size=size,
+        num_candidates=num_candidates,
+        cfg=cfg,
+        log=log,
+    )
 
 # Gemini Vector 유사도를 이용한 검색
 def dense_retrieve_gemini(es, model, index_name, query_str, size, num_candidates=100, cfg=None):
@@ -533,19 +524,16 @@ def dense_retrieve_gemini(es, model, index_name, query_str, size, num_candidates
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
 
-    # num_candidates 보정
-    orig_num_cand = num_candidates
-    if num_candidates < size:
-        num_candidates = size
-        log.warning(f"[Gemini] num_candidates({orig_num_cand}) < k/size({size}) → num_candidates={num_candidates}로 보정")
-
-    knn = {
-        "field": "embeddings_gemini",
-        "query_vector": query_embedding,
-        "k": size,
-        "num_candidates": num_candidates
-    }
-    return es.search(index=index_name, knn=knn, size=size)
+    return _dense_search(
+        es=es,
+        index_name=index_name,
+        vector_field="embeddings_gemini",
+        query_vector=query_embedding,
+        size=size,
+        num_candidates=num_candidates,
+        cfg=cfg,
+        log=log,
+    )
 
 # HyDE 기법을 활용한 Gemini Dense Retrieve
 def dense_retrieve_gemini_hyde(es, model, index_name, query_str, size, num_candidates, client, cfg):
@@ -571,18 +559,16 @@ def dense_retrieve_gemini_hyde(es, model, index_name, query_str, size, num_candi
     if hasattr(query_embedding, 'tolist'):
         query_embedding = query_embedding.tolist()
 
-    orig_num_cand = num_candidates
-    if num_candidates < size:
-        num_candidates = size
-        log.warning(f"[Gemini-HyDE] num_candidates({orig_num_cand}) < k/size({size}) → num_candidates={num_candidates}로 보정")
-
-    knn = {
-        "field": "embeddings_gemini",
-        "query_vector": query_embedding,
-        "k": size,
-        "num_candidates": num_candidates
-    }
-    return es.search(index=index_name, knn=knn, size=size)
+    return _dense_search(
+        es=es,
+        index_name=index_name,
+        vector_field="embeddings_gemini",
+        query_vector=query_embedding,
+        size=size,
+        num_candidates=num_candidates,
+        cfg=cfg,
+        log=log,
+    )
 
 def retrieve_all(es, index_name):
     """모든 문서를 조회하여 리랭킹 후보로 사용하기 위한 리스트를 반환한다.
@@ -781,6 +767,82 @@ from utils.query_embedding_cache import (
     get_cache_entry as qe_get,
     set_cache_entry as qe_set,
 )
+
+
+# =========================
+# Dense 검색 모드/스크립트 점수 유틸
+# =========================
+
+def _get_dense_mode(cfg):
+    try:
+        mode = getattr(getattr(cfg, 'dense', {}), 'mode', 'ann')
+        return str(mode).lower() if mode else 'ann'
+    except Exception:
+        return 'ann'
+
+
+def _get_dense_metric(cfg):
+    try:
+        metric = getattr(getattr(cfg, 'dense', {}), 'metric', 'cosine')
+        return str(metric).lower() if metric else 'cosine'
+    except Exception:
+        return 'cosine'
+
+
+def _build_script_score_query(vector_field: str, query_vector, metric: str):
+    """
+    ES script_score 쿼리 객체 생성
+    - metric: cosine | dot | l2 (exact 전용)
+    """
+    metric = (metric or 'cosine').lower()
+    if metric == 'dot':
+        source = f"dotProduct(params.q, '{vector_field}')"
+    elif metric == 'l2':
+        # 거리가 작을수록 유사하므로 부호 반전하여 큰 값이 상위로 오게 함
+        source = f"-l2norm(params.q, '{vector_field}')"
+    else:
+        # 기본 cosine: [-1,1] → 양수화
+        source = f"cosineSimilarity(params.q, '{vector_field}') + 1.0"
+
+    return {
+        "script_score": {
+            "query": {"match_all": {}},
+            "script": {
+                "source": source,
+                "params": {"q": query_vector},
+            },
+        }
+    }
+
+
+def _dense_search(es, index_name: str, vector_field: str, query_vector, size: int, num_candidates: int, cfg, log: logging.Logger = None):
+    """ANN(knn) 또는 Exact(script_score)로 dense 검색 실행.
+    - mode: cfg.dense.mode (ann | exact)
+    - metric: cfg.dense.metric (exact 전용)
+    - size/num_candidates: ANN일 때만 num_candidates 사용
+    """
+    mode = _get_dense_mode(cfg)
+    if mode == 'exact':
+        metric = _get_dense_metric(cfg)
+        query = _build_script_score_query(vector_field, query_vector, metric)
+        if log:
+            log.info(f"[dense-exact] metric={metric} field={vector_field} size={size}")
+        return es.search(index=index_name, query=query, size=size)
+    else:
+        orig_num_cand = num_candidates
+        if num_candidates < size:
+            num_candidates = size
+            if log:
+                log.warning(f"[dense-ann] num_candidates({orig_num_cand}) < size({size}) → {num_candidates}")
+        knn = {
+            "field": vector_field,
+            "query_vector": query_vector,
+            "k": size,
+            "num_candidates": num_candidates,
+        }
+        if log:
+            log.info(f"[dense-ann] field={vector_field} size={size} num_candidates={num_candidates}")
+        return es.search(index=index_name, knn=knn, size=size)
 
 # OpenAI 및 Gemini 클라이언트 생성 함수
 def create_llm_client(cfg):
