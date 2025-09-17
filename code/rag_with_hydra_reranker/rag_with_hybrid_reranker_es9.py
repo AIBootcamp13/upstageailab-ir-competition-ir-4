@@ -19,6 +19,21 @@ os.chdir(SCRIPT_DIR)
 # .env 파일에서 환경 변수 로드
 load_dotenv()
 
+# OPENAI_BASE_URL 환경변수 정리: 공백/빈 문자열이면 제거하여 SDK 기본값 사용 보장
+def _sanitize_openai_base_url_env():
+    try:
+        val = os.getenv("OPENAI_BASE_URL")
+        if val is not None and val.strip() == "":
+            os.environ.pop("OPENAI_BASE_URL", None)
+            logging.getLogger(__name__).info(
+                "OPENAI_BASE_URL가 빈 값으로 감지되어 제거했습니다. OpenAI 기본 base URL을 사용합니다."
+            )
+    except Exception:
+        # 환경 변수 접근/수정에서 문제가 나더라도 실행을 막지 않음
+        pass
+
+_sanitize_openai_base_url_env()
+
 # 메모리 사용량 측정 유틸리티 함수
 def log_memory_usage(log, message=""):
     """CPU와 GPU 메모리 사용량을 로그에 출력"""
@@ -791,8 +806,10 @@ def create_llm_client(cfg):
         log.info(f"OpenAI 호환 클라이언트 생성: {model_name}")
         openai_base_url = os.getenv("OPENAI_BASE_URL")
         if openai_base_url:
+            log.info(f"base_url: {openai_base_url}")
             return OpenAI(base_url=openai_base_url)
         else:
+            log.info(f"base_url 미지정")
             return OpenAI()
 
 def apply_llm_delay(cfg):
