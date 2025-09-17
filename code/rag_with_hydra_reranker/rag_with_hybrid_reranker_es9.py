@@ -1126,9 +1126,22 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
         gemini_hyde_enabled = getattr(cfg.retrieve.dense_gemini_hyde, 'enabled', False)
 
         documents = []
+        # 각 retrieve 방식별 DocID 수집을 위한 리스트 (source 및 중복 판단용)
+        sparse_docids = []
+        upstage_docids = []
+        sbert_docids = []
+        hyde_docids = []
+        gemini_docids = []
+        gemini_hyde_docids = []
+
         if not sparse_enabled and not upstage_enabled and not sbert_enabled and not upstage_hyde_enabled and not gemini_enabled and not gemini_hyde_enabled:
             # 리트리브 비활성화: 전체 문서를 리랭킹 대상으로 사용
             documents = retrieve_all(es, index_name)
+            # 기본 인덱스는 sparse 인덱스이므로 sparse로 간주
+            try:
+                sparse_docids = [d.get("docid") for d in documents if d.get("docid")]
+            except Exception:
+                sparse_docids = []
         else:
             docids = set()
             # 각 retrieve 방식별 문서 수집 현황 추적을 위한 카운터
@@ -1139,13 +1152,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             gemini_count = 0
             gemini_hyde_count = 0
 
-            # 각 retrieve 방식별 DocID 수집을 위한 리스트
-            sparse_docids = []
-            upstage_docids = []
-            sbert_docids = []
-            hyde_docids = []
-            gemini_docids = []
-            gemini_hyde_docids = []
+            # 각 retrieve 방식별 DocID 수집을 위한 리스트는 위에서 초기화됨
             if sparse_enabled:
                 sparse_result = sparse_retrieve(es, cfg.index.sparse.name, standalone_query, cfg.retrieve.sparse.top_k)
                 sparse_retrieved = len(sparse_result['hits']['hits'])
@@ -1314,11 +1321,37 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             reranked_documents = documents[:cfg.reranker.top_k]
         
         # 최종 결과를 response에 저장
+        # 소스 및 중복 여부 계산을 위한 집합 생성 (방식별 세분화)
+        sparse_set = set(sparse_docids)
+        upstage_set = set(upstage_docids)
+        sbert_set = set(sbert_docids)
+        upstage_hyde_set = set(hyde_docids)
+        gemini_set = set(gemini_docids)
+        gemini_hyde_set = set(gemini_hyde_docids)
         retrieved_context = []
         for doc in reranked_documents:
             retrieved_context.append(doc["content"])
             response["topk"].append(doc["docid"])
-            response["references"].append({"score": doc["score"], "content": doc["content"]})
+            docid_val = doc.get("docid")
+            sources = []
+            if docid_val in sparse_set:
+                sources.append("sparse")
+            if docid_val in upstage_set:
+                sources.append("upstage")
+            if docid_val in sbert_set:
+                sources.append("sbert")
+            if docid_val in upstage_hyde_set:
+                sources.append("upstage_hyde")
+            if docid_val in gemini_set:
+                sources.append("gemini")
+            if docid_val in gemini_hyde_set:
+                sources.append("gemini_hyde")
+            response["references"].append({
+                "score": doc["score"],
+                "content": doc["content"],
+                "is_duplicated": bool(len(sources) >= 2),
+                "source": ", ".join(sources) if sources else ""
+            })
 
         if cfg.qa.use_final_answer:
             # 검색된 컨텍스트로 별도 QA 수행
