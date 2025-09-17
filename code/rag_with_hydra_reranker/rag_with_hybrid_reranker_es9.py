@@ -435,9 +435,9 @@ def generate_hypothetical_document(query, client, cfg):
 
         # result 타입에 따라 적절히 처리
         if isinstance(result, dict):
-            hypothetical_doc = result["choices"][0]["message"]["content"]
+            hypothetical_doc = result["choices"][0]["message"]["content"].strip()
         else:
-            hypothetical_doc = result.choices[0].message.content
+            hypothetical_doc = result.choices[0].message.content.strip()
         log.debug(f"Generated hypothetical document for query: {query[:50]}...")
 
         # 설정에 따라 생성된 문서 출력
@@ -650,7 +650,7 @@ def _format_instruction(instruction, query, doc):
 
 
 # 공식 사용법 기반 reranking (배치 처리 및 메모리 관리 기능 추가)
-def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg, client=None):
+def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg, client=None, original_query=None):
     log = logging.getLogger(__name__)
 
     if reranker_tokenizer is None or reranker_model is None or reranker_aux is None:
@@ -664,13 +664,20 @@ def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reran
 
         # HyDE 기법 사용 여부 확인
         use_hyde = getattr(cfg.reranker, 'use_hyde', False)
-        rerank_query = query
+
+        # HyDE 전역 설정에 따라 기본 쿼리 결정
+        if getattr(cfg.hyde, 'use_original_query', False) and original_query:
+            base_query = original_query
+        else:
+            base_query = query
+
+        rerank_query = base_query
 
         if use_hyde and client is not None:
             log.info("Reranker HyDE 기법 활성화 - 가상 문서 생성 중...")
-            rerank_query = generate_hypothetical_document(query, client, cfg)
+            rerank_query = generate_hypothetical_document(base_query, client, cfg)
         elif use_hyde and client is None:
-            log.warning("Reranker HyDE 활성화되었으나 client가 없어 원본 쿼리 사용")
+            log.warning("Reranker HyDE 활성화되었으나 client가 없어 기본 쿼리 사용")
 
         log.info(f"Reranking with {'HyDE query' if use_hyde and client else 'original query'}")
 
@@ -836,19 +843,17 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
         retry_max = int(getattr(cfg.llm, 'retry_max', 5) or 5)
         retry_delay = int(getattr(cfg.llm, 'retry_delay_seconds', 30) or 30)
 
-        # OpenAI 메시지 형식을 Gemini types.Content 형식으로 변환
+        # OpenAI 메시지를 Gemini 형식으로 변환하되 system 프롬프트는 systemInstruction에 전달
         contents = []
+        system_instruction_text = None
         for msg in messages:
-            role = "user" if msg["role"] in ["user", "system"] else "model"
-            # system 메시지는 user로 포함 (Gemini는 system role 없음)
-            content_text = msg["content"]
-            if msg["role"] == "system":
-                content_text = f"System: {content_text}"
-
-            contents.append(types.Content(
-                role=role,
-                parts=[types.Part.from_text(text=content_text)]
-            ))
+            role_in = msg.get("role", "user")
+            text = msg.get("content", "")
+            if role_in == "system":
+                system_instruction_text = (system_instruction_text + "\n" + text) if system_instruction_text else text
+                continue
+            role = "user" if role_in == "user" else "model"
+            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=text)]))
 
         # Gemini tool calling 지원
         gemini_tools = None
@@ -865,9 +870,26 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
                     )
                     gemini_tools.append(types.Tool(function_declarations=[gemini_func]))
 
+        # HyDE 프롬프트가 감지되면 AFC 비활성화 (HyDE는 함수호출 불필요)
+        afc = None
+        try:
+            use_hyde = False
+            hyde_hint = getattr(getattr(cfg, 'prompts', object()), 'hyde', None)
+            if hyde_hint:
+                for m in messages:
+                    if m.get('content') and hyde_hint in m.get('content'):
+                        use_hyde = True
+                        break
+            if use_hyde:
+                afc = types.AutomaticFunctionCallingConfig(disable=True)
+        except Exception:
+            afc = None
+
         config = types.GenerateContentConfig(
             temperature=cfg.llm.temperature,
             tools=gemini_tools if gemini_tools else None,
+            systemInstruction=system_instruction_text,
+            automaticFunctionCalling=afc,
         )
 
         # 2xx가 아닌 응답/예외 발생 시 재시도
@@ -976,10 +998,24 @@ def call_llm_unified(client, messages, cfg, tools=None, tool_choice=None):
         if hasattr(cfg.llm, 'reasoning_effort') and getattr(cfg.llm, 'reasoning_effort'):
             openai_params["reasoning_effort"] = cfg.llm.reasoning_effort
 
-        if tools:
-            openai_params["tools"] = tools
-        if tool_choice:
-            openai_params["tool_choice"] = tool_choice
+        # HyDE 프롬프트가 감지되면 함수 호출 비활성화 (HyDE는 함수호출 불필요)
+        use_hyde_openai = False
+        try:
+            hyde_hint = getattr(getattr(cfg, 'prompts', object()), 'hyde', None)
+            if hyde_hint:
+                for m in messages:
+                    if m.get('content') and hyde_hint in m.get('content'):
+                        use_hyde_openai = True
+                        break
+        except Exception:
+            use_hyde_openai = False
+
+        # HyDE 미사용시에만 tools와 tool_choice 설정
+        if not use_hyde_openai:
+            if tools:
+                openai_params["tools"] = tools
+            if tool_choice:
+                openai_params["tool_choice"] = tool_choice
 
         raw = client.chat.completions.create(**openai_params)
         try:
@@ -1073,6 +1109,15 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
         # 설정 토글에 따른 검색 동작 분기
         response["standalone_query"] = standalone_query
 
+        # 원본 사용자 쿼리 추출 (HyDE 옵션용)
+        original_user_query = ""
+        if messages:
+            # 마지막 사용자 메시지에서 원본 쿼리 추출
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    original_user_query = msg.get("content", "")
+                    break
+
         sparse_enabled = getattr(cfg.retrieve.sparse, 'enabled', True)
         upstage_enabled = getattr(cfg.retrieve.dense_upstage, 'enabled', False)
         sbert_enabled = getattr(cfg.retrieve.dense_sbert, 'enabled', False)
@@ -1081,9 +1126,22 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
         gemini_hyde_enabled = getattr(cfg.retrieve.dense_gemini_hyde, 'enabled', False)
 
         documents = []
+        # 각 retrieve 방식별 DocID 수집을 위한 리스트 (source 및 중복 판단용)
+        sparse_docids = []
+        upstage_docids = []
+        sbert_docids = []
+        hyde_docids = []
+        gemini_docids = []
+        gemini_hyde_docids = []
+
         if not sparse_enabled and not upstage_enabled and not sbert_enabled and not upstage_hyde_enabled and not gemini_enabled and not gemini_hyde_enabled:
             # 리트리브 비활성화: 전체 문서를 리랭킹 대상으로 사용
             documents = retrieve_all(es, index_name)
+            # 기본 인덱스는 sparse 인덱스이므로 sparse로 간주
+            try:
+                sparse_docids = [d.get("docid") for d in documents if d.get("docid")]
+            except Exception:
+                sparse_docids = []
         else:
             docids = set()
             # 각 retrieve 방식별 문서 수집 현황 추적을 위한 카운터
@@ -1094,13 +1152,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             gemini_count = 0
             gemini_hyde_count = 0
 
-            # 각 retrieve 방식별 DocID 수집을 위한 리스트
-            sparse_docids = []
-            upstage_docids = []
-            sbert_docids = []
-            hyde_docids = []
-            gemini_docids = []
-            gemini_hyde_docids = []
+            # 각 retrieve 방식별 DocID 수집을 위한 리스트는 위에서 초기화됨
             if sparse_enabled:
                 sparse_result = sparse_retrieve(es, cfg.index.sparse.name, standalone_query, cfg.retrieve.sparse.top_k)
                 sparse_retrieved = len(sparse_result['hits']['hits'])
@@ -1167,8 +1219,10 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             # HyDE 기법을 활용한 Upstage Dense Retrieve
             if upstage_hyde_enabled and dense_ctx and dense_ctx.get('upstage_hyde'):
                 duh = dense_ctx['upstage_hyde']
+                # HyDE 전역 설정에 따라 쿼리 선택
+                hyde_query = original_user_query if getattr(cfg.hyde, 'use_original_query', False) else standalone_query
                 dense_result = dense_retrieve_upstage_hyde(
-                    es, duh.get('model'), cfg.index.upstage.name, standalone_query,
+                    es, duh.get('model'), cfg.index.upstage.name, hyde_query,
                     cfg.retrieve.dense_upstage_hyde.top_k, cfg.retrieve.dense_upstage_hyde.num_candidates,
                     client, cfg
                 )
@@ -1216,8 +1270,10 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             # HyDE 기법을 활용한 Gemini Dense Retrieve
             if gemini_hyde_enabled and dense_ctx and dense_ctx.get('gemini_hyde'):
                 dgh = dense_ctx['gemini_hyde']
+                # HyDE 전역 설정에 따라 쿼리 선택
+                hyde_query = original_user_query if getattr(cfg.hyde, 'use_original_query', False) else standalone_query
                 dense_result = dense_retrieve_gemini_hyde(
-                    es, dgh.get('model'), cfg.index.gemini.name, standalone_query,
+                    es, dgh.get('model'), cfg.index.gemini.name, hyde_query,
                     cfg.retrieve.dense_gemini_hyde.top_k, cfg.retrieve.dense_gemini_hyde.num_candidates,
                     client, cfg
                 )
@@ -1259,17 +1315,43 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
 
         # Reranker가 활성화된 경우 reranking 수행
         if cfg.reranker.use_reranker and reranker_tokenizer is not None and reranker_model is not None:
-            reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg, client)
+            reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg, client, original_user_query)
         else:
             # Reranker가 비활성화된 경우 상위 top_k개만 선택
             reranked_documents = documents[:cfg.reranker.top_k]
         
         # 최종 결과를 response에 저장
+        # 소스 및 중복 여부 계산을 위한 집합 생성 (방식별 세분화)
+        sparse_set = set(sparse_docids)
+        upstage_set = set(upstage_docids)
+        sbert_set = set(sbert_docids)
+        upstage_hyde_set = set(hyde_docids)
+        gemini_set = set(gemini_docids)
+        gemini_hyde_set = set(gemini_hyde_docids)
         retrieved_context = []
         for doc in reranked_documents:
             retrieved_context.append(doc["content"])
             response["topk"].append(doc["docid"])
-            response["references"].append({"score": doc["score"], "content": doc["content"]})
+            docid_val = doc.get("docid")
+            sources = []
+            if docid_val in sparse_set:
+                sources.append("sparse")
+            if docid_val in upstage_set:
+                sources.append("upstage")
+            if docid_val in sbert_set:
+                sources.append("sbert")
+            if docid_val in upstage_hyde_set:
+                sources.append("upstage_hyde")
+            if docid_val in gemini_set:
+                sources.append("gemini")
+            if docid_val in gemini_hyde_set:
+                sources.append("gemini_hyde")
+            response["references"].append({
+                "score": doc["score"],
+                "content": doc["content"],
+                "is_duplicated": bool(len(sources) >= 2),
+                "source": ", ".join(sources) if sources else ""
+            })
 
         if cfg.qa.use_final_answer:
             # 검색된 컨텍스트로 별도 QA 수행
@@ -1326,20 +1408,21 @@ def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, dense_
         idx = 0
         for line in f:
             j = json.loads(line)
-            log.info(f'🚩Test {idx + 1} - Question: {j["msg"]}')
-            response = answer_question(j["msg"], client, cfg, es, index_name, dense_ctx, reranker_tokenizer, reranker_model, reranker_aux)
-            log.info(f'Answer: {response["answer"]}')
-            log.info(f'Retrieved {"👆일반질문👆" if len(response["topk"]) == 0 else len(response["topk"])} documents: {response["topk"]}')
-            log.debug(f'References: {len(response["references"])} items')
+            if True:  # idx + 1 == 115 or idx + 1 == 117:
+                log.info(f'🚩Test {idx + 1} - Question: {j["msg"]}')
+                response = answer_question(j["msg"], client, cfg, es, index_name, dense_ctx, reranker_tokenizer, reranker_model, reranker_aux)
+                log.info(f'Answer: {response["answer"]}')
+                log.info(f'Retrieved {"👆일반질문👆" if len(response["topk"]) == 0 else len(response["topk"])} documents: {response["topk"]}')
+                log.debug(f'References: {len(response["references"])} items')
 
-            # 일반질문일 경우 리스트에 저장
-            if len(response["topk"]) == 0:
-                general_questions.append({"eval_id": j["eval_id"], "answer": response["answer"]})
-                general_eval_ids.append(j["eval_id"])
+                # 일반질문일 경우 리스트에 저장
+                if len(response["topk"]) == 0:
+                    general_questions.append({"eval_id": j["eval_id"], "answer": response["answer"]})
+                    general_eval_ids.append(j["eval_id"])
 
-            # 대회 score 계산은 topk 정보를 사용, answer 정보는 LLM을 통한 자동평가시 활용
-            output = {"eval_id": j["eval_id"], "standalone_query": response["standalone_query"], "topk": response["topk"], "answer": response["answer"], "references": response["references"]}
-            of.write(f'{json.dumps(output, ensure_ascii=False)}\n')
+                # 대회 score 계산은 topk 정보를 사용, answer 정보는 LLM을 통한 자동평가시 활용
+                output = {"eval_id": j["eval_id"], "standalone_query": response["standalone_query"], "topk": response["topk"], "answer": response["answer"], "references": response["references"]}
+                of.write(f'{json.dumps(output, ensure_ascii=False)}\n')
             idx += 1
 
             if cfg.eval.max_iterations > 0 and idx >= cfg.eval.max_iterations:
