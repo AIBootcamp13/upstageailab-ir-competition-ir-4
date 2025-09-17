@@ -435,9 +435,9 @@ def generate_hypothetical_document(query, client, cfg):
 
         # result 타입에 따라 적절히 처리
         if isinstance(result, dict):
-            hypothetical_doc = result["choices"][0]["message"]["content"]
+            hypothetical_doc = result["choices"][0]["message"]["content"].strip()
         else:
-            hypothetical_doc = result.choices[0].message.content
+            hypothetical_doc = result.choices[0].message.content.strip()
         log.debug(f"Generated hypothetical document for query: {query[:50]}...")
 
         # 설정에 따라 생성된 문서 출력
@@ -1308,7 +1308,7 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
 
         # Reranker가 활성화된 경우 reranking 수행
         if cfg.reranker.use_reranker and reranker_tokenizer is not None and reranker_model is not None:
-            reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg, client, original_query)
+            reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg, client, original_user_query)
         else:
             # Reranker가 비활성화된 경우 상위 top_k개만 선택
             reranked_documents = documents[:cfg.reranker.top_k]
@@ -1375,7 +1375,7 @@ def eval_rag(eval_filename, output_filename, client, cfg, es, index_name, dense_
         idx = 0
         for line in f:
             j = json.loads(line)
-            if idx + 1 == 115 or idx + 1 == 117:
+            if True:  # idx + 1 == 115 or idx + 1 == 117:
                 log.info(f'🚩Test {idx + 1} - Question: {j["msg"]}')
                 response = answer_question(j["msg"], client, cfg, es, index_name, dense_ctx, reranker_tokenizer, reranker_model, reranker_aux)
                 log.info(f'Answer: {response["answer"]}')
