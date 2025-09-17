@@ -5,6 +5,8 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import argparse
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 
 def format_instruction(instruction, query, doc):
     if instruction is None:
@@ -163,7 +165,7 @@ def main():
     
     # 문서와 쿼리 로딩
     documents = load_documents(args.documents_path)
-    queries = load_eval_queries(args.eval_path)
+    queries = load_eval_queries(args.eval_path)[:1]
     
     # Reranker 초기화
     reranker = QwenReranker(
