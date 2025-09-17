@@ -102,7 +102,26 @@ reranker:
   use_hyde: false  # HyDE 기법으로 가상 문서 생성하여 리랭킹 여부
   model_name: "Qwen/Qwen3-Reranker-8B"
   batch_size: 4
-  instruction: "Given a web search query, retrieve relevant passages"
+  # 공식 가이드 기반 지시문/템플릿 설정
+  instruction: "Given a web search query, retrieve relevant passages that answer the query"
+  format_template: |
+    <Instruct>: {instruction}
+    <Query>: {query}
+    <Document>: {doc}
+  system_prefix: |
+    <|im_start|>system
+    Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>
+    <|im_start|>user
+  assistant_suffix: |
+    <|im_end|>
+    <|im_start|>assistant
+    <think>
+    
+    </think>
+    
+  max_length: 8192
+  true_token: "yes"
+  false_token: "no"
   top_k: 3        # 리랭킹 후 최종 선택할 문서 수
   
 # 임베딩 배치 설정 (모델명은 각 retrieve 섹션에 정의)

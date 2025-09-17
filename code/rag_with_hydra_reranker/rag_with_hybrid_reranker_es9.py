@@ -616,14 +616,16 @@ def initialize_reranker(cfg):
 
         model = AutoModelForCausalLM.from_pretrained(cfg.reranker.model_name, **kwargs).to(device).eval()
 
-        # yes/no 토큰 id
-        token_false_id = tokenizer.convert_tokens_to_ids("no")
-        token_true_id = tokenizer.convert_tokens_to_ids("yes")
-        max_length = 8192
+        # true/false 토큰 id (config로 관리)
+        true_token_str = getattr(cfg.reranker, 'true_token', 'yes')
+        false_token_str = getattr(cfg.reranker, 'false_token', 'no')
+        token_false_id = tokenizer.convert_tokens_to_ids(false_token_str)
+        token_true_id = tokenizer.convert_tokens_to_ids(true_token_str)
+        max_length = int(getattr(cfg.reranker, 'max_length', 8192) or 8192)
 
-        # 공식 프리픽스/서픽스 템플릿
-        prefix = "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n"
-        suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        # 프리픽스/서픽스 템플릿 (config로 관리, 기본값은 공식 가이드 값)
+        prefix = getattr(cfg.reranker, 'system_prefix', "<|im_start|>system\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n")
+        suffix = getattr(cfg.reranker, 'assistant_suffix', "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
         prefix_tokens = tokenizer.encode(prefix, add_special_tokens=False)
         suffix_tokens = tokenizer.encode(suffix, add_special_tokens=False)
 
@@ -642,12 +644,22 @@ def initialize_reranker(cfg):
         return None, None, None
 
 
-def _format_instruction(instruction, query, doc):
-    if instruction is None or len(str(instruction).strip()) == 0:
-        instruction = 'Given a web search query, retrieve relevant passages that answer the query'
-    return "<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {doc}".format(
-        instruction=instruction, query=query, doc=doc
-    )
+def _format_instruction(instruction, query, doc, cfg=None):
+    # 템플릿과 기본 지시문은 config에서 가져오되, 누락 시 안전한 기본값 사용
+    default_instruction = 'Given a web search query, retrieve relevant passages that answer the query'
+    default_template = "<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {doc}"
+    tpl = None
+    if cfg is not None and getattr(cfg, 'reranker', None) is not None:
+        tpl = getattr(cfg.reranker, 'format_template', None)
+        if not tpl or not str(tpl).strip():
+            tpl = default_template
+        if not instruction or not str(instruction).strip():
+            instruction = getattr(cfg.reranker, 'instruction', default_instruction)
+    else:
+        if not instruction or not str(instruction).strip():
+            instruction = default_instruction
+        tpl = default_template
+    return tpl.format(instruction=instruction, query=query, doc=doc)
 
 
 # 공식 사용법 기반 reranking (배치 처리 및 메모리 관리 기능 추가)
@@ -694,7 +706,7 @@ def rerank_documents(query, documents, reranker_tokenizer, reranker_model, reran
             batch_docs = documents[i:i + batch_size]
             
             # 입력 문자열 생성 (HyDE 쿼리 또는 원본 쿼리 사용)
-            pairs = [_format_instruction(instruction, actual_query, doc["content"]) for doc in batch_docs]
+            pairs = [_format_instruction(instruction, actual_query, doc["content"], cfg) for doc in batch_docs]
 
             # 토크나이즈
             max_length = reranker_aux['max_length']
