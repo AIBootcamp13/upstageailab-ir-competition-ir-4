@@ -32,22 +32,55 @@
 ### Directory
 
 ```
-├── code
-│   ├── baseline
-│   │   ├── rag_with_elasticsearch.py      # 베이스라인 단일 스크립트 (RAG + ES)
-│   │   ├── README.md                      # 베이스라인 실행 가이드
-│   │   ├── install_elasticsearch.sh       # 로컬 Elasticsearch 8.x 설치 스크립트
-│   │   └── env_template.txt               # .env 템플릿 (ES/LLM 키)
-│   └── rag_with_hydra
-│       ├── rag_with_hydra.py              # Hydra 기반 RAG 실행 스크립트
-│       ├── env_template.txt               # .env 템플릿 (ES/LLM 키)
-│       └── conf
-│           └── config.yaml                # Hydra 구성 기반 고급 설정 예시
-├── input
-│   └── data
-│       ├── documents.jsonl                # 문서 코퍼스
-│       └── eval.jsonl                     # 평가 데이터
-└── README.md
+├── code                              # 프로젝트 소스 디렉터리
+│   ├── baseline                      # 베이스라인 RAG + Elasticsearch 구현
+│   │   ├── rag_with_elasticsearch.py # 베이스라인 실행 스크립트
+│   │   ├── install_elasticsearch.sh  # Elasticsearch 8.x 설치 스크립트
+│   │   ├── install_elasticsearch_9.0.3.sh # Elasticsearch 9.x 설치 스크립트
+│   │   ├── start_elasticsearch.sh    # Elasticsearch 시작 스크립트
+│   │   ├── stop_elasticsearch.sh     # Elasticsearch 종료 스크립트
+│   │   ├── env_template.txt          # .env 템플릿(ES/LLM 키)
+│   │   ├── README.md                 # 베이스라인 사용 가이드
+│   │   └── sample_submission*.csv    # 제출 포맷 샘플 파일들
+│   ├── eval                          # 평가 유틸리티 및 결과 모음
+│   │   ├── reranker_eval.py          # 내부 평가 스크립트
+│   ├── mentoring                     # 멘토링 예제/스크립트/산출물
+│   │   ├── biencoder.py              # 바이인코더 실험 코드
+│   │   ├── reranker.py               # 리랭커 스크립트
+│   │   ├── reranker2.py              # 리랭커 변형 스크립트
+│   │   ├── run_biencoder.sh          # 바이인코더 실행 스크립트
+│   │   ├── run_reranker.sh           # 리랭커 실행 스크립트
+│   │   ├── run_reranker2.sh          # 리랭커 v2 실행 스크립트
+│   │   └── ...                        # 기타 산출물/로그
+│   ├── rag_with_hydra_reranker       # 하이브리드 검색 + 리랭커 파이프라인
+│   │   ├── rag_with_hybrid_reranker_es8.py  # ES 8.x 실행 스크립트
+│   │   ├── rag_with_hybrid_reranker_es9.py  # ES 9.x 실행 스크립트
+│   │   ├── rag_with_hybrid_reranker_es9_voting.py # 투표 앙상블 실행
+│   │   ├── reranker_usage.py         # reranker 공식 사용 예시 스크립트
+│   │   ├── run.sh                    # 복수 실험 실행 스크립트
+│   │   ├── env_template.txt          # .env 템플릿(ES/LLM 키)
+│   │   ├── README_gemini_embeddings.md # Gemini 임베딩 가이드
+│   │   ├── conf/...                  # Hydra 설정 모음
+│   │   ├── tools/...                 # 보조 도구 스크립트
+│   │   ├── utils/...                 # 캐시/유틸리티
+│   │   ├── outputs/...               # 실험 로그 및 결과
+│   │   ├── cache/...                 # LLM/임베딩 캐시
+│   │   └── gemini_embeddings/...     # 사전 생성된 임베딩 파일
+│   ├── hard_voting.py                # 단순 하드 보팅 스크립트
+│   ├── hard_voting_weight.py         # 가중 하드 보팅 스크립트
+│   └── hard_voting_weight2.py        # 가중 하드 보팅 스크립트 v2
+├── docs                              # 문서 디렉터리
+├── input                             # 데이터 디렉터리
+│   └── data                          # 입력 데이터
+│       ├── documents.jsonl           # 문서 코퍼스
+│       └── eval.jsonl                # 평가 질의 세트
+├── scripts                           # 보조 스크립트
+│   ├── enable_flash_attn_env.sh      # FlashAttention 환경 설정
+│   └── python_glibc32_wrapper.sh     # glibc 2.32 파이썬 래퍼
+├── AGENTS.md                         # 에이전트 관련 문서
+├── pyproject.toml                    # Python/uv 패키지 설정
+├── uv.lock                           # uv 잠금 파일
+└── README.md                         # 프로젝트 개요 및 사용법
 ```
 
 ### baseline 코드 실행
