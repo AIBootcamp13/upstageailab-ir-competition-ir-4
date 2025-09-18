@@ -231,9 +231,7 @@ uv run python code/rag_with_hydra_reranker/gemini_embedding_generator.py
 - 제출 파일: `sample_submission.csv` 또는 `submission.csv` 형식(JSON Lines → CSV 확장자)
 - 점수 산출: `topk` 기반 평가(답변 텍스트는 자동평가 시 보조 용도)
 
-### Presentation
 
-- 발표 자료 업로드 예정
 
 ## etc
 
@@ -246,6 +244,26 @@ uv run python code/rag_with_hydra_reranker/gemini_embedding_generator.py
 - Elasticsearch 8.x KNN 검색
 - Sentence-Transformers 한국어 SBERT
 - OpenAI(Chat Completions) 호환 API
+
+---
+
+## 📌 프로젝트 회고
+### 멤버별 소감
+
+#### 류지헌
+- 하이브리드 RAG 아키텍처 설계와 Hydra 기반 파이프라인 구현을 통해 검색 품질 향상의 핵심을 체감했습니다. Sparse/Dense 검색의 조합, HyDE 기법, 하드보팅/리랭커 앙상블을 통한 성능 개선 과정에서 팀원들과의 협업이 큰 도움이 되었습니다. 캐시 시스템과 메모리 관리 최적화로 운영 안정성도 크게 향상시킬 수 있었습니다.
+
+#### 김태현
+- HyDE 프롬프트 엔지니어링과 하드보팅/리랭커 전략 수립에 기여했습니다. 다양한 검색 백엔드의 결과를 효과적으로 결합하는 방법을 연구하고, 하드보팅/리랭커의 스코어링 방식을 최적화했습니다. 실험 결과를 바탕으로 최적의 앙상블 전략을 도출할 수 있었습니다.
+
+#### 박진섭
+- 통합 LLM 호출 레이어와 캐시 시스템 구축, 환경 설정 표준화에 집중했습니다. OpenAI 호환/Gemini API 통합, 디스크 캐시 시스템, FlashAttention 환경 설정 등을 통해 개발/운영 효율성을 크게 향상시켰습니다. Hydra 기반 설정 관리와 문서화를 통해 팀 온보딩 시간을 단축할 수 있었습니다.
+
+#### 문진숙
+- 한국어 `nori` 분석기와 멀티 임베딩 백엔드(Upstage/SBERT/Gemini) 조합을 통한 검색 성능 최적화에 집중했습니다. 문서 전처리와 인덱스 분리 전략이 검색 정확도에 미치는 영향을 체계적으로 분석하고, Hydra 설정을 통한 실험 관리 효율성을 크게 개선할 수 있었습니다.
+
+#### 김재덕
+- Elasticsearch 9.x 기반 멀티 인덱스 관리와 임베딩 최적화에 집중했습니다. ANN/Exact 검색 모드 전환, Query Embedding 캐시 시스템 구축을 통해 성능과 비용 효율성을 동시에 개선했습니다. Gemini 임베딩 사전 생성 파이프라인을 구축해 API 호출 비용을 크게 절감할 수 있었습니다.
 
 ---
 

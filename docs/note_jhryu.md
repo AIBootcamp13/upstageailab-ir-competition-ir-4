@@ -1,3 +1,28 @@
+## 데이터 구성
+
+이번 대회는 머신러닝 모델을 학습하는 것 보다는 임베딩 생성 모델, 검색엔진, LLM 등을 활용하여 레퍼런스를 잘 추출하고 이를 토대로 얼마나 답변을 잘 생성하는지 판단하는 대회입니다.
+
+색인대상 데이터 (documents.jsonl) : 4272개 (Open Ko LLM Leaderboard에 들어가는 Ko-H4 데이터 중 MMLU, ARC 데이터 기반)
+평가질의 데이터 (eval.jsonl) : 220개
+
+
+### 일상 질문 20개 구분하기 (RAG대상 아님)
+```
+{"eval_id": 2, "msg": [{"role": "user", "content": "이제 그만 얘기하자."}]}
+{"eval_id": 32, "msg": [{"role": "user", "content": "오늘 너무 즐거웠다!"}]}
+{"eval_id": 57, "msg": [{"role": "user", "content": "우울한데 신나는 얘기 좀 해줄래?"}]}
+...
+```
+
+### 멀티 턴 대화문 20개 (RAG대상에 포함됨)
+```
+{"eval_id": 3, "msg": [{"role": "user", "content": "동물들이 종종 집단으로 이주하는 경우가 발생하더라구?"}, {"role": "assistant", "content": "네 맞습니다."}, {"role": "user", "content": "이렇게 집단으로 이주하게 되는 계기는 어떤 것들이 있어?"}]}
+{"eval_id": 33, "msg": [{"role": "user", "content": "Python 공부중이야."}, {"role": "assistant", "content": "네 python은 배워 두시면 유용합니다."}, {"role": "user", "content": "list의 값중 가장 작은 값을 알려주는 함수가 뭐야?"}]}
+{"eval_id": 39, "msg": [{"role": "user", "content": "새로 만든 항생제가 드디어 나왔어."}, {"role": "assistant", "content": "네 무엇을 도와 드릴까요?"}, {"role": "user", "content": "그 효과를 확실히 얘기하기 위해서 해야할 일은?"}]}
+...
+```
+
+
 retrieve method | llm | MAP | MRR
 -- | -- | -- | --
 dense_gemini_embedding_hyde(org) | solar-pro2 | - | -
@@ -50,22 +75,6 @@ sparse (bm25) | gemini-2.5-flash | - | -
 - function_calling프롬프트 변경1 :  "일반 상식선에서 답변이 가능하더라도 무조건 search api를 호출" 추가
 - standalone_query_description 변경 : query -> korean query 변경
 
-
-## 일상 질문 20개 구분하기 (RAG대상 아님)
-```
-{"eval_id": 2, "msg": [{"role": "user", "content": "이제 그만 얘기하자."}]}
-{"eval_id": 32, "msg": [{"role": "user", "content": "오늘 너무 즐거웠다!"}]}
-{"eval_id": 57, "msg": [{"role": "user", "content": "우울한데 신나는 얘기 좀 해줄래?"}]}
-...
-```
-
-## 멀티 턴 대화문 20개 (RAG대상에 포함됨)
-```
-{"eval_id": 3, "msg": [{"role": "user", "content": "동물들이 종종 집단으로 이주하는 경우가 발생하더라구?"}, {"role": "assistant", "content": "네 맞습니다."}, {"role": "user", "content": "이렇게 집단으로 이주하게 되는 계기는 어떤 것들이 있어?"}]}
-{"eval_id": 33, "msg": [{"role": "user", "content": "Python 공부중이야."}, {"role": "assistant", "content": "네 python은 배워 두시면 유용합니다."}, {"role": "user", "content": "list의 값중 가장 작은 값을 알려주는 함수가 뭐야?"}]}
-{"eval_id": 39, "msg": [{"role": "user", "content": "새로 만든 항생제가 드디어 나왔어."}, {"role": "assistant", "content": "네 무엇을 도와 드릴까요?"}, {"role": "user", "content": "그 효과를 확실히 얘기하기 위해서 해야할 일은?"}]}
-...
-```
 
 k10_all_hard_voting_rank5
 0.9121/0.9121, 0.9152/0.9152
