@@ -226,11 +226,56 @@ uv run python code/rag_with_hydra_reranker/gemini_embedding_generator.py
 
 ## 5. Result
 
-### Leader Board
+### 주요 실험 결과
 
-- 제출 파일: `sample_submission.csv` 또는 `submission.csv` 형식(JSON Lines → CSV 확장자)
-- 점수 산출: `topk` 기반 평가(답변 텍스트는 자동평가 시 보조 용도)
+#### 리트리브 방식별 실험결과 점
+수
+retrieve method | llm | MAP | MRR
+-- | -- | -- | --
+sparse (bm25) | solar-pro2 | 0.7742 | 0.7788
+dense_sbert_embedding | solar-pro2 | 0.5053 | 0.5061
+dense_upstage_embedding(PCA768) | solar-pro2 | 0.8939 | 0.8970
+dense_upstage_embedding | solar-pro2 | 0.8970 | 0.8985
+dense_upstage_embedding_hyde | solar-pro2 | 0.8197 | 0.8227
+dense_gemini_embedding | solar-pro2 | 0.8985 | 0.9030
 
+#### 하이브리드,하드보팅/리랭킹 실험결과 점수
+
+method | MAP | MRR
+-- | -- | --
+llm(solar-pro2), retrieve(each topk 10) : sparse + dense (sbert + upstage + upstage_hyde + gemini + gemini_hyde), hard_voting(rank5) | 0.9121/0.9121 | 0.9152/0.9152
+llm(solar-pro2), retrieve(each topk 10) : sparse + dense (sbert + upstage + upstage_hyde + gemini + gemini_hyde), reranker(hyde_prompt2) | 0.9167/0.8417 | 0.9197/0.8424
+llm(solar-pro2), retrieve(each topk 10) : sparse + dense (sbert + upstage + upstage_hyde + gemini + gemini_hyde), reranker(hyde_prompt1) | 0.8811/0.8303 | 0.8833/0.8348
+llm(solar-pro2), retrieve(dense_gemini_embeddding) | 0.8985/0.9182 | 0.9030/0.9182
+
+#### retrival topk 실험
+- sparse(bm25)+dense(solar2) = hybrid retrieval 방식 적용
+- 각 retrival topk실험시 40개부근에서 가장 점수가 잘나옴. (아래는 리더보드 MAP 점수)
+  - 100일때 0.8894
+  - 50일때 0.8955
+  - 45일때 0.8970
+  - 40일때 0.9061 <= 같은조건 실험 최고
+  - 30일때 0.8992 
+
+#### csv 하드보팅
+
+method | MAP | MRR
+-- | -- | --
+hard_voting_csv10 (5:3:1) | 0.9424/0.8985 | 0.9439/0.9000
+
+- 결과csv들을 여러개 취합하여 해당 topk 3개를 첫번째 두번째 세번째 순서대로 가중치를 주어 다시 topk 3개를 뽑는다.
+- 1:1:1 의 점수 가중치보다 5:3:1로 가중치를 준것이 점수가 더 좋았다. (5:3:1 > 3:2:1 > 4:3:2 > 1:1:1)
+
+
+#### 최적 설정
+- **검색**: Sparse(BM25) + Dense(Upstage + Gemini + SBERT) 조합
+- **앙상블**: Hard Voting (5:3:1 가중치) 또는 Reranker (HyDE prompt2)
+- **Function Calling**: chit-chat 20개 제외하고 모든 질문에 검색 수행
+- **최고 성능**: Hard Voting CSV 앙상블 (MAP: 0.9424, MRR: 0.9439)
+
+#### 제출 형식
+- 파일: `sample_submission.csv` 또는 `submission.csv` 형식(JSON Lines → CSV 확장자)
+- 평가: `topk` 기반 평가(답변 텍스트는 자동평가 시 보조 용도)
 
 
 ## etc
