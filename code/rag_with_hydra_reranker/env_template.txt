@@ -1,0 +1,25 @@
+# 환경 변수 템플릿 파일
+# 이 파일을 .env로 복사하고 실제 값으로 변경하세요
+
+# Elasticsearch 비밀번호
+# Elasticsearch 설치 후 생성된 비밀번호를 입력하세요
+ELASTICSEARCH_PASSWORD=your_elasticsearch_password_here
+
+# OpenAI API 키
+# OpenAI 플랫폼에서 발급받은 API 키를 입력하세요
+OPENAI_API_KEY=sk-your_openai_api_key_here
+
+# OpenAI API Base URL (선택사항)
+# upstage 등 다른 OpenAI 호환 서비스 사용시 설정
+OPENAI_BASE_URL=https://api.upstage.ai/v1
+
+# Upstage API 키
+UPSTAGE_API_KEY=your_openai_api_key_here
+
+# Google API 키
+GOOGLE_API_KEY=your_openai_api_key_here
+
+# 사용 방법:
+# 1. 이 파일을 .env로 복사: cp env_template.txt .env
+# 2. .env 파일을 열어서 실제 값으로 변경
+# 3. .env 파일은 절대 git에 커밋하지 마세요 (.gitignore에 추가 권장)
