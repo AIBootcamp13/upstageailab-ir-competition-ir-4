@@ -2,7 +2,6 @@
 __pycache__
 outputs/
 *.csv
-gemini_embeddings/
 !code/mentoring/reranked_submission.csv
 !code/mentoring/similarity_scores.csv
 !code/baseline/sample_submission.csv
