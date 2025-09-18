@@ -99,7 +99,8 @@ retrieve:
 # 리랭커 설정
 reranker:
   use_reranker: true
-  use_hyde: false  # HyDE 기법으로 가상 문서 생성하여 리랭킹 여부
+  use_hard_voting: false  # true이면 각 검색 방식에서 등장한 횟수 기반 하드 보팅으로 top_k 선택
+  use_hyde: true  # HyDE 기법으로 가상 문서 생성하여 리랭킹 여부
   model_name: "Qwen/Qwen3-Reranker-8B"
   batch_size: 4
   # 공식 가이드 기반 지시문/템플릿 설정
