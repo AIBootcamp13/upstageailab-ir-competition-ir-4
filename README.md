@@ -83,6 +83,32 @@
 └── README.md                         # 프로젝트 개요 및 사용법
 ```
 
+### 시스템 아키텍처
+
+```mermaid
+flowchart TD
+    U[사용자] --> FC[LLM Function Calling<br/>OpenAI 호환 또는 Gemini]
+
+    FC -->|standalone_query| ORC[Retrieve Orchestrator]
+    FC -.->|HyDE 프롬프트| HYDE[가상 문서 생성]
+    HYDE --> ORC
+
+    ORC --> ES_Sparse[(ES Index: sparse<br/>text + nori)]
+    ORC --> ES_Upstage[(ES Index: upstage<br/>4096d dense_vector)]
+    ORC --> ES_SBERT[(ES Index: sbert<br/>768d dense_vector)]
+    ORC --> ES_Gemini[(ES Index: gemini<br/>3072d dense_vector)]
+
+    ORC --> MERGE[문서 병합/중복 관리]
+    MERGE --> VOTE[Hard Voting<br/>simple/rank_based]
+    MERGE --> RERANK[CausalLM Reranker<br/>yes/no scoring, batch]
+
+    VOTE --> SEL[최종 상위 k 문서]
+    RERANK --> SEL
+
+    SEL --> QA[LLM QA optional]
+    QA --> OUT[outputs 결과 JSONL]
+```
+
 
 ### 하이브리드 RAG(Hydra + Voting/Reranker) 실행
 
