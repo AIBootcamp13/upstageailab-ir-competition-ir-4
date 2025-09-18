@@ -212,7 +212,7 @@ uv run python code/rag_with_hydra_reranker/gemini_embedding_generator.py
   - 통합 호출 레이어와 디스크 캐시(`utils/llm_cache.py`) 지원
 - Reranking / Voting
   - Hard voting: source 중복(simple) 또는 상위 n 순위 가중(rank_based)
-  - CausalLM 기반 reranker: yes/no 스코어링, 배치 처리와 메모리 정리 포함
+  - Qwen3-Reranker-8B: yes/no 스코어링, 배치 처리와 메모리 정리 포함
 - HyDE(가상 문서) 지원
   - Retrieve와 Reranker 모두 선택적 적용, 원쿼리/standalone 쿼리 선택 가능
 
@@ -220,7 +220,7 @@ uv run python code/rag_with_hydra_reranker/gemini_embedding_generator.py
 - 질의 분석(Function Calling)로 `standalone_query` 생성
 - Retrieve 실행: 설정된 백엔드(Sparse/Upstage/SBERT/Gemini + HyDE 변형)를 병합 수집
   - KNN(ANN) 또는 Exact(script_score)로 dense 검색 수행, Query Embedding 캐시 활용
-- 통합 랭킹: Hard voting 또는 CausalLM reranker로 상위 `reranker.top_k` 최종 선택
+- 통합 랭킹: Hard voting 또는 Qwen3-Reranker-8B로 상위 `reranker.top_k` 최종 선택
 - QA(optional): `qa.use_final_answer=true` 시, 선택 문서 컨텍스트를 붙여 최종 답변 생성
 - 출력: 각 질의에 대해 `standalone_query`, `topk`, `answer`, `references`를 JSON Lines로 저장
 
@@ -330,7 +330,7 @@ OPENAI_MODEL=선택(기본: config에서 관리)
 ### 확장 포인트
 - Dense 검색 모드 전환: `dense.mode=ann|exact`, `dense.metric=cosine|dot|l2`
 - 하드보팅 가중 전략: `reranker.hard_voting.mode=simple|rank_based`, `rank_based_n` 조정
-- 리랭커 대체 모델 및 토큰 커스터마이즈(`true_token/false_token`, `max_length`, `batch_size`)
+- 리랭커 대체 모델(Qwen3-Reranker-8B 외 다른 모델) 및 토큰 커스터마이즈(`true_token/false_token`, `max_length`, `batch_size`)
 - 캐시/지연 설정으로 레이트리밋 대응(`llm.cache.*`, `llm.delay_seconds`)
 - Hydra 구성(`code/rag_with_hydra_reranker/conf/config.yaml`) 기반 파이프라인 파라미터화
 

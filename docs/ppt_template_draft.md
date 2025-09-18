@@ -54,6 +54,7 @@
 - **검색엔진**: Elasticsearch 9.x (한국어 nori 분석기)
 - **임베딩 모델**: Upstage(4096d), SBERT(768d), Gemini(3072d)
 - **LLM**: Solar-Pro2, GPT-4o-mini, Gemini 2.5 Flash
+- **리랭커**: Qwen3-Reranker-8B
 - **프레임워크**: Hydra, LangChain, Sentence-Transformers
 - **언어**: Python 3.10+, uv 패키지 관리
 
@@ -99,6 +100,7 @@
 **데이터 처리 및 연동**
 - Elasticsearch 멀티 인덱스 관리 (sparse, upstage, sbert, gemini)
 - Query Embedding 캐시 시스템으로 API 비용 절감
+- Qwen3-Reranker-8B 모델을 활용한 문서 관련성 평가
 - Hydra 설정 기반 실험 관리 및 파라미터화
 
 
@@ -117,7 +119,7 @@
 
 **기능3: 앙상블 랭킹 시스템**
 - 하드보팅: 여러 검색 결과의 중복도 기반 랭킹 (5:3:1 가중치)
-- 리랭커: CausalLM 기반 yes/no 스코어링으로 문서 관련성 평가
+- 리랭커: Qwen3-Reranker-8B 기반 yes/no 스코어링으로 문서 관련성 평가
 - 최고 성능: 하드보팅 CSV 앙상블 (MAP: 0.9424, MRR: 0.9439)
 
 **기능4: Function Calling 기반 질문 분류**
@@ -134,7 +136,7 @@
 - 결과: MAP 0.3402 → 0.8720으로 대폭 향상
 
 **문제 2: 메모리 부족 및 차원 불일치**
-- 문제: Qwen-embedding 8B 모델 사용 시 CUDA 메모리 부족
+- 문제: Qwen3-Reranker 8B 모델 사용 시 CUDA 메모리 부족
 - 해결: `os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"` 적용
 - 추가: 메모리 정리 및 배치 크기 조절로 안정성 확보
 

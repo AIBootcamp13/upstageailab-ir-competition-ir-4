@@ -7,7 +7,7 @@
 	- 과학질문인 경우로 하지않고 chit-chat인지 아닌지로 구분하기로 함. 
 	- 일반질문이 아닌데 빠트리는 경우가 있어 애를 먹음.
 	  
-- Qwen-embedding적용
+- Qwen3-Reranker 적용
 	- 0.6B, 4B, 8B가 있는데 높은 모델일경우 memory Error가 발생하여 모델을 낮추고 batch_size조절등을 하였으나 
 	- os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True" 소스 적용 및 메모리 cleaning적용 후 메모리 문제가 해결됨.
 	  
