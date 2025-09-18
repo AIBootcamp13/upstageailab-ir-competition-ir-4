@@ -1223,11 +1223,18 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
 
         documents = []
         doc_sources_map = defaultdict(set)
+        doc_rank_map = defaultdict(dict)
 
         def register_source(docid, source):
             if not docid:
                 return
             doc_sources_map[docid].add(source)
+
+        def register_rank(docid, source, rank):
+            if not docid or rank is None:
+                return
+            if source not in doc_rank_map[docid]:
+                doc_rank_map[docid][source] = rank
         # 각 retrieve 방식별 DocID 수집을 위한 리스트 (source 및 중복 판단용)
         sparse_docids = []
         upstage_docids = []
@@ -1244,8 +1251,10 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                 sparse_docids = [d.get("docid") for d in documents if d.get("docid")]
             except Exception:
                 sparse_docids = []
-            for doc in documents:
-                register_source(doc.get("docid"), "sparse")
+            for rank, doc in enumerate(documents, start=1):
+                docid = doc.get("docid")
+                register_source(docid, "sparse")
+                register_rank(docid, "sparse", rank)
         else:
             docids = set()
             # 각 retrieve 방식별 문서 수집 현황 추적을 위한 카운터
@@ -1260,11 +1269,12 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             if sparse_enabled:
                 sparse_result = sparse_retrieve(es, cfg.index.sparse.name, standalone_query, cfg.retrieve.sparse.top_k)
                 sparse_retrieved = len(sparse_result['hits']['hits'])
-                for rst in sparse_result['hits']['hits']:
+                for rank, rst in enumerate(sparse_result['hits']['hits'], start=1):
                     src = rst.get("_source", {})
                     docid = src.get("docid")
                     if docid:
                         register_source(docid, "sparse")
+                        register_rank(docid, "sparse", rank)
                         sparse_docids.append(docid)  # 가져온 모든 docid 수집
                         if docid not in docids:
                             docids.add(docid)
@@ -1284,11 +1294,12 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                     cfg.retrieve.dense_upstage.top_k, cfg.retrieve.dense_upstage.num_candidates, cfg
                 )
                 upstage_retrieved = len(dense_result['hits']['hits'])
-                for rst in dense_result['hits']['hits']:
+                for rank, rst in enumerate(dense_result['hits']['hits'], start=1):
                     src = rst.get("_source", {})
                     docid = src.get("docid")
                     if docid:
                         register_source(docid, "upstage")
+                        register_rank(docid, "upstage", rank)
                         upstage_docids.append(docid)  # 가져온 모든 docid 수집
                         if docid not in docids:
                             docids.add(docid)
@@ -1307,11 +1318,12 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                     cfg.retrieve.dense_sbert.top_k, cfg.retrieve.dense_sbert.num_candidates, cfg
                 )
                 sbert_retrieved = len(dense_result['hits']['hits'])
-                for rst in dense_result['hits']['hits']:
+                for rank, rst in enumerate(dense_result['hits']['hits'], start=1):
                     src = rst.get("_source", {})
                     docid = src.get("docid")
                     if docid:
                         register_source(docid, "sbert")
+                        register_rank(docid, "sbert", rank)
                         sbert_docids.append(docid)  # 가져온 모든 docid 수집
                         if docid not in docids:
                             docids.add(docid)
@@ -1334,11 +1346,12 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                     client, cfg
                 )
                 hyde_retrieved = len(dense_result['hits']['hits'])
-                for rst in dense_result['hits']['hits']:
+                for rank, rst in enumerate(dense_result['hits']['hits'], start=1):
                     src = rst.get("_source", {})
                     docid = src.get("docid")
                     if docid:
                         register_source(docid, "upstage_hyde")
+                        register_rank(docid, "upstage_hyde", rank)
                         hyde_docids.append(docid)  # 가져온 모든 docid 수집
                         if docid not in docids:
                             docids.add(docid)
@@ -1359,11 +1372,12 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                     cfg.retrieve.dense_gemini.top_k, cfg.retrieve.dense_gemini.num_candidates, cfg
                 )
                 gemini_retrieved = len(dense_result['hits']['hits'])
-                for rst in dense_result['hits']['hits']:
+                for rank, rst in enumerate(dense_result['hits']['hits'], start=1):
                     src = rst.get("_source", {})
                     docid = src.get("docid")
                     if docid:
                         register_source(docid, "gemini")
+                        register_rank(docid, "gemini", rank)
                         gemini_docids.append(docid)  # 가져온 모든 docid 수집
                         if docid not in docids:
                             docids.add(docid)
@@ -1387,11 +1401,12 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
                     client, cfg
                 )
                 gemini_hyde_retrieved = len(dense_result['hits']['hits'])
-                for rst in dense_result['hits']['hits']:
+                for rank, rst in enumerate(dense_result['hits']['hits'], start=1):
                     src = rst.get("_source", {})
                     docid = src.get("docid")
                     if docid:
                         register_source(docid, "gemini_hyde")
+                        register_rank(docid, "gemini_hyde", rank)
                         gemini_hyde_docids.append(docid)  # 가져온 모든 docid 수집
                         if docid not in docids:
                             docids.add(docid)
@@ -1424,21 +1439,58 @@ def answer_question(messages, client, cfg, es, index_name, dense_ctx=None, reran
             log.info(f"📊 Retrieve 요약: {summary} = 총 {total_docs}개 문서")
 
         hard_voting_enabled = getattr(cfg.reranker, 'use_hard_voting', False)
+        hard_voting_cfg = getattr(cfg.reranker, 'hard_voting', None)
+        hard_voting_mode = 'simple'
+        if hard_voting_cfg is not None:
+            hard_voting_mode = str(getattr(hard_voting_cfg, 'mode', 'simple') or 'simple').lower()
         reranked_documents = []
+        top_k_limit = max(1, int(getattr(cfg.reranker, 'top_k', 1) or 1))
         if hard_voting_enabled:
-            weighted_docs = []
-            for idx, doc in enumerate(documents):
-                docid = doc.get("docid")
-                sources = doc_sources_map.get(docid, set())
-                weighted_docs.append((len(sources), idx, doc))
-            weighted_docs.sort(key=lambda item: (-item[0], item[1]))
-            reranked_documents = [doc for _, _, doc in weighted_docs[:cfg.reranker.top_k]]
-            log.info(f"Hard voting enabled: {len(reranked_documents)}개 문서 선택 (source 중복 반영)")
+            if hard_voting_mode == 'rank_based':
+                default_n = top_k_limit
+                rank_based_n = default_n
+                if hard_voting_cfg is not None:
+                    rank_based_n = getattr(hard_voting_cfg, 'rank_based_n', default_n)
+                try:
+                    rank_based_n = int(rank_based_n)
+                except (TypeError, ValueError):
+                    rank_based_n = default_n
+                rank_based_n = max(1, rank_based_n)
+
+                scored_docs = []
+                for idx, doc in enumerate(documents):
+                    docid = doc.get("docid")
+                    if not docid:
+                        scored_docs.append((0, idx, doc))
+                        continue
+                    source_ranks = doc_rank_map.get(docid, {})
+                    score = 0
+                    for method, rank in source_ranks.items():
+                        if rank <= rank_based_n:
+                            score += (rank_based_n - rank + 1)
+                    scored_docs.append((score, idx, doc))
+
+                scored_docs.sort(key=lambda item: (-item[0], item[1]))
+                reranked_documents = [doc for score, _, doc in scored_docs[:top_k_limit]]
+                log.info(
+                    f"Hard voting(mode=rank_based, n={rank_based_n}) 적용: {len(reranked_documents)}개 문서 선택 (순위 가중치 반영)"
+                )
+            else:
+                weighted_docs = []
+                for idx, doc in enumerate(documents):
+                    docid = doc.get("docid")
+                    sources = doc_sources_map.get(docid, set())
+                    weighted_docs.append((len(sources), idx, doc))
+                weighted_docs.sort(key=lambda item: (-item[0], item[1]))
+                reranked_documents = [doc for _, _, doc in weighted_docs[:top_k_limit]]
+                log.info(
+                    f"Hard voting(mode=simple) 적용: {len(reranked_documents)}개 문서 선택 (source 중복 반영)"
+                )
         elif cfg.reranker.use_reranker and reranker_tokenizer is not None and reranker_model is not None:
             reranked_documents = rerank_documents(standalone_query, documents, reranker_tokenizer, reranker_model, reranker_aux, cfg, client, original_user_query)
         else:
             # Reranker가 비활성화된 경우 상위 top_k개만 선택
-            reranked_documents = documents[:cfg.reranker.top_k]
+            reranked_documents = documents[:top_k_limit]
 
         # 최종 결과를 response에 저장
         method_order = ["sparse", "upstage", "sbert", "upstage_hyde", "gemini", "gemini_hyde"]

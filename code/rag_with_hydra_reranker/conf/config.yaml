@@ -99,7 +99,10 @@ retrieve:
 # 리랭커 설정
 reranker:
   use_reranker: true
-  use_hard_voting: false  # true이면 각 검색 방식에서 등장한 횟수 기반 하드 보팅으로 top_k 선택
+  use_hard_voting: false  # true이면 hard_voting.mode에 따라 reranker 대신 하드 보팅 적용
+  hard_voting:
+    mode: simple       # simple | rank_based
+    rank_based_n: 10   # mode=rank_based일 때 각 리트리버에서 반영할 상위 문서 수
   use_hyde: true  # HyDE 기법으로 가상 문서 생성하여 리랭킹 여부
   model_name: "Qwen/Qwen3-Reranker-8B"
   batch_size: 4
