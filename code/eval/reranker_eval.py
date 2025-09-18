@@ -222,10 +222,12 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
 
-    MODEL_ID = "Qwen/Qwen3-Reranker-0.6B"
-    BATCH_SIZE = 20
+    # MODEL_ID = "Qwen/Qwen3-Reranker-0.6B"
+    # BATCH_SIZE = 20
     # MODEL_ID = "Qwen/Qwen3-Reranker-4B"
     # BATCH_SIZE = 5
+    MODEL_ID = "Qwen/Qwen3-Reranker-8B"
+    BATCH_SIZE = 4
     DEVICE = "cuda"  # "cpu" 또는 "cuda"
     MAX_LENGTH = 8192
     LOCAL_FILES_ONLY = False #True  # 네트워크 없이 로컬 캐시/경로만 사용
