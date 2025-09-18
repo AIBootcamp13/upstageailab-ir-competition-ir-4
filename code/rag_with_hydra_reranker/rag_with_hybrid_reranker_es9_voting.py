@@ -591,6 +591,9 @@ def retrieve_all(es, index_name):
 # 공식 사용법 기반 Qwen3-Reranker-8B 초기화 (CausalLM + yes/no)
 def initialize_reranker(cfg):
     log = logging.getLogger(__name__)
+    if getattr(cfg.reranker, 'use_hard_voting', False):
+        log.info("Hard voting 활성화됨: reranker 모델 로드를 건너뜁니다.")
+        return None, None, None
     if not cfg.reranker.use_reranker:
         return None, None, None
 
