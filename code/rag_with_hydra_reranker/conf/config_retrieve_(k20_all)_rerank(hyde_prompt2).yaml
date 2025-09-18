@@ -58,40 +58,35 @@ prompts:
 hyde:
   use_original_query: false  # true면 원본 사용자 쿼리 사용, false면 standalone_query 사용
 
-# Dense 전역 스위치(ANN/Exact)
-dense:
-  mode: ann  # ann | exact
-  metric: cosine  # exact 전용: cosine | dot | l2 (mode=exact에서만 사용)
-
 # 리트리브 설정
 retrieve:
   sparse:
     enabled: true   # sparse retrieve 활성화 여부
-    top_k: 10       # sparse_retrieve에서 가져올 문서 수
+    top_k: 20       # sparse_retrieve에서 가져올 문서 수
   dense_upstage:
     enabled: true   # Upstage 임베딩 기반 dense 활성화 여부
     model_name: "solar-embedding-1-large"
-    top_k: 10       # dense_retrieve_upstage에서 가져올 문서 수
+    top_k: 20       # dense_retrieve_upstage에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
   dense_sbert:
     enabled: true   # SBERT 임베딩 기반 dense 활성화 여부
     model_name: "snunlp/KR-SBERT-V40K-klueNLI-augSTS"
-    top_k: 10       # dense_retrieve_sbert에서 가져올 문서 수
+    top_k: 20       # dense_retrieve_sbert에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
   dense_upstage_hyde:
     enabled: true  # HyDE 기법을 활용한 Upstage 임베딩 활성화 여부 (dense_upstage와 동일한 모델 사용)
-    top_k: 10       # dense_retrieve_upstage_hyde에서 가져올 문서 수
+    top_k: 20       # dense_retrieve_upstage_hyde에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
   dense_gemini:
     enabled: true  # Gemini 임베딩 기반 dense 활성화 여부
     model_name: "models/gemini-embedding-001"  # Gemini 임베딩 모델 (3072차원)
-    top_k: 10       # dense_retrieve_gemini에서 가져올 문서 수
+    top_k: 20       # dense_retrieve_gemini에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
     batch_size: 100  # 배치 처리 크기 (rate limit 회피)
     batch_delay_seconds: 65  # 배치 처리 후 대기 시간 (초)
   dense_gemini_hyde:
     enabled: true  # HyDE 기법을 활용한 Gemini 임베딩 활성화 여부
-    top_k: 10       # dense_retrieve_gemini_hyde에서 가져올 문서 수
+    top_k: 20       # dense_retrieve_gemini_hyde에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
     batch_size: 100  # 배치 처리 크기 (rate limit 회피)
     batch_delay_seconds: 65  # 배치 처리 후 대기 시간 (초)
@@ -102,26 +97,7 @@ reranker:
   use_hyde: true  # HyDE 기법으로 가상 문서 생성하여 리랭킹 여부
   model_name: "Qwen/Qwen3-Reranker-8B"
   batch_size: 4
-  # 공식 가이드 기반 지시문/템플릿 설정
-  instruction: "Given a web search query, retrieve relevant passages that answer the query"
-  format_template: |
-    <Instruct>: {instruction}
-    <Query>: {query}
-    <Document>: {doc}
-  system_prefix: |
-    <|im_start|>system
-    Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>
-    <|im_start|>user
-  assistant_suffix: |
-    <|im_end|>
-    <|im_start|>assistant
-    <think>
-    
-    </think>
-    
-  max_length: 8192
-  true_token: "yes"
-  false_token: "no"
+  instruction: "Given a web search query, retrieve relevant passages"
   top_k: 3        # 리랭킹 후 최종 선택할 문서 수
   
 # 임베딩 배치 설정 (모델명은 각 retrieve 섹션에 정의)
