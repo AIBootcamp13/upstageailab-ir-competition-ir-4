@@ -12,7 +12,7 @@
 	- os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True" 소스 적용 및 메모리 cleaning적용 후 메모리 문제가 해결됨.
 	  
 - sparse(bm25)+dense(solar2) = hybrid retrieval 방식 적용
-	- 각 retrival topk실험시 40개부근에서 가장 점수가 잘나옴.
+	- 각 retrival topk실험시 40개부근에서 가장 점수가 잘나옴. (아래는 리더보드 MAP 점수)
 		- 100일때0.8894
 		- 50일때 0.8955
 		- 45일때 0.8970
@@ -29,4 +29,4 @@
 
 - hard-voting 
 	- 결과csv들을 여러개 취합하여 해당 topk 3개를 첫번째 두번째 세번째 순서대로 가중치를 주어 다시 topk 3개를 뽑는다.
-	- 1:1:1 의 점수 가중치보다 5:3:1로 가중치를 준것이 점수가 더 좋았다)
+	- 1:1:1 의 점수 가중치보다 5:3:1로 가중치를 준것이 점수가 더 좋았다. (5:3:1 > 3:2:1 > 4:3:2 > 1:1:1)
