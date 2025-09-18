@@ -42,9 +42,17 @@ if [[ ! -x "${PYTHON_WRAPPER}" ]]; then
 fi
 
 FLASH_ATTN_UV_BIN="$(command -v uv)"
+if [[ -z "${FLASH_ATTN_UV_BIN}" ]] && [[ $(command -v uv) ]]; then
+  FLASH_ATTN_UV_BIN=$(command -v uv)
+fi
 if [[ -z "${FLASH_ATTN_UV_BIN}" ]]; then
   echo "[flash-attn env] uv 명령을 찾을 수 없습니다." >&2
   return 1
+fi
+
+export TZ="${TZ:-Asia/Seoul}"
+if [[ -d "/usr/share/zoneinfo" ]]; then
+  export TZDIR="${TZDIR:-/usr/share/zoneinfo}"
 fi
 
 uv() {
@@ -88,5 +96,5 @@ uv() {
   command "${FLASH_ATTN_UV_BIN}" "$@"
 }
 
-echo "[flash-attn env] 준비 완료. 'uv run python ...' 또는 'uv run <script>.py' 명령이 glibc 2.32 래퍼를 사용합니다."
+echo "[flash-attn env] 준비 완료. 'uv run python ...' 또는 'uv run <script>.py' 명령이 glibc 2.32 래퍼를 사용하고 KST 타임존이 적용됩니다."
 echo "[flash-attn env] uv 함수가 재정의되었습니다. 현재 래퍼: ${PYTHON_WRAPPER}"
