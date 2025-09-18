@@ -20,6 +20,9 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# 현재 스크립트 파일의 디렉토리를 작업 디렉토리로 설정
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+os.chdir(SCRIPT_DIR)
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -219,15 +222,15 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
 
-    # MODEL_ID = "Qwen/Qwen3-Reranker-0.6B"
-    # BATCH_SIZE = 20
-    MODEL_ID = "Qwen/Qwen3-Reranker-4B"
-    BATCH_SIZE = 10
+    MODEL_ID = "Qwen/Qwen3-Reranker-0.6B"
+    BATCH_SIZE = 20
+    # MODEL_ID = "Qwen/Qwen3-Reranker-4B"
+    # BATCH_SIZE = 5
     DEVICE = "cuda"  # "cpu" 또는 "cuda"
     MAX_LENGTH = 8192
     LOCAL_FILES_ONLY = False #True  # 네트워크 없이 로컬 캐시/경로만 사용
-    USE_FP16 = False  # DEVICE가 cuda인 경우에만 의미 있음
-    ATTENTION_IMPL = None  # 예: "flash_attention_2" (환경 지원 시)
+    USE_FP16 = True #False  # DEVICE가 cuda인 경우에만 의미 있음
+    ATTENTION_IMPL = "flash_attention_2" #None  # 예: "flash_attention_2" (환경 지원 시)
 
     target_path = Path(args.target_dir)
     if not target_path.exists() or not target_path.is_dir():

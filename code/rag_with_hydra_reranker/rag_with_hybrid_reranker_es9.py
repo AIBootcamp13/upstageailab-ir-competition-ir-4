@@ -601,6 +601,7 @@ def initialize_reranker(cfg):
         if device == 'cuda':
             kwargs.update({
                 'dtype': torch.float16,
+                'attn_implementation': "flash_attention_2"
             })
 
         tokenizer = AutoTokenizer.from_pretrained(cfg.reranker.model_name, padding_side='left')
