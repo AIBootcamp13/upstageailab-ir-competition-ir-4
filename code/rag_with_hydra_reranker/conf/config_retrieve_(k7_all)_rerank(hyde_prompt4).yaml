@@ -67,31 +67,31 @@ dense:
 retrieve:
   sparse:
     enabled: true   # sparse retrieve 활성화 여부
-    top_k: 10       # sparse_retrieve에서 가져올 문서 수
+    top_k: 7       # sparse_retrieve에서 가져올 문서 수
   dense_upstage:
     enabled: true   # Upstage 임베딩 기반 dense 활성화 여부
     model_name: "solar-embedding-1-large"
-    top_k: 10       # dense_retrieve_upstage에서 가져올 문서 수
+    top_k: 7       # dense_retrieve_upstage에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
   dense_sbert:
     enabled: true   # SBERT 임베딩 기반 dense 활성화 여부
     model_name: "snunlp/KR-SBERT-V40K-klueNLI-augSTS"
-    top_k: 10       # dense_retrieve_sbert에서 가져올 문서 수
+    top_k: 7       # dense_retrieve_sbert에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
   dense_upstage_hyde:
     enabled: true  # HyDE 기법을 활용한 Upstage 임베딩 활성화 여부 (dense_upstage와 동일한 모델 사용)
-    top_k: 10       # dense_retrieve_upstage_hyde에서 가져올 문서 수
+    top_k: 7       # dense_retrieve_upstage_hyde에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
   dense_gemini:
     enabled: true  # Gemini 임베딩 기반 dense 활성화 여부
     model_name: "models/gemini-embedding-001"  # Gemini 임베딩 모델 (3072차원)
-    top_k: 10       # dense_retrieve_gemini에서 가져올 문서 수
+    top_k: 7       # dense_retrieve_gemini에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
     batch_size: 100  # 배치 처리 크기 (rate limit 회피)
     batch_delay_seconds: 65  # 배치 처리 후 대기 시간 (초)
   dense_gemini_hyde:
     enabled: true  # HyDE 기법을 활용한 Gemini 임베딩 활성화 여부
-    top_k: 10       # dense_retrieve_gemini_hyde에서 가져올 문서 수
+    top_k: 7       # dense_retrieve_gemini_hyde에서 가져올 문서 수
     num_candidates: 500  # KNN 후보 수
     batch_size: 100  # 배치 처리 크기 (rate limit 회피)
     batch_delay_seconds: 65  # 배치 처리 후 대기 시간 (초)
@@ -103,7 +103,7 @@ reranker:
   model_name: "Qwen/Qwen3-Reranker-8B"
   batch_size: 4
   # 공식 가이드 기반 지시문/템플릿 설정
-  instruction: "Given a web search query, retrieve relevant passages that answer the query"
+  instruction: "The given Query and Document are highly relevant."
   format_template: |
     <Instruct>: {instruction}
     <Query>: {query}

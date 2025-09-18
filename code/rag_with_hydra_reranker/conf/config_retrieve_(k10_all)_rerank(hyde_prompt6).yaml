@@ -103,7 +103,7 @@ reranker:
   model_name: "Qwen/Qwen3-Reranker-8B"
   batch_size: 4
   # 공식 가이드 기반 지시문/템플릿 설정
-  instruction: "Given a web search query, retrieve relevant passages that answer the query"
+  instruction: "Document 는 Query를 답변하기 위해 참고해야하는 적합한 문서이다."
   format_template: |
     <Instruct>: {instruction}
     <Query>: {query}
