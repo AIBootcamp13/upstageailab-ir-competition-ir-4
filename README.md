@@ -8,13 +8,13 @@
 
 ## 0. Overview
 ### Environment
-- OS: Linux (테스트: Ubuntu 20.04/22.04 계열)
+- OS: Linux/Mac (테스트: Ubuntu 20.04/22.04, macOS 14+)
 - Python: 3.10+
 
 ### Requirements
 - Python 패키지: `uv`(권장)
-- Elasticsearch 8.x (로컬 설치 스크립트 제공)
-- 모델/키: OpenAI API 또는 Upstage 호환 OpenAI API, Sentence-Transformers
+- Elasticsearch 9.x 권장(8.x도 일부 스크립트 제공)
+- 모델/키: OpenAI 호환 API(upstage 포함) 또는 Gemini API, Sentence-Transformers
 
 ## 1. Competiton Info
 
@@ -83,31 +83,71 @@
 └── README.md                         # 프로젝트 개요 및 사용법
 ```
 
-### baseline 코드 실행
+
+### 하이브리드 RAG(Hydra + Voting/Reranker) 실행
+
+최신 파이프라인은 `code/rag_with_hydra_reranker/rag_with_hybrid_reranker_es9_voting.py` 입니다. Elasticsearch 9.x, 한국어 `nori`, 멀티 인덱스(역색인 + 여러 dense 백엔드), HyDE, 하드보팅/리랭커, LLM/임베딩 캐시를 지원합니다.
+
 ```bash
-# UV 설치
-pip install uv
-
-cd code/baseline
-
-# .env 생성하고 LLM API 키 입력
-cp env_template.txt .env
-# OPENAI_API_KEY에 upstage api key입력
+# 환경 준비
+pip install uv  # UV 설치
 
 # Elasticsearch 설치 (아직 설치 안한 경우만 설치)
-./install_elasticsearch.sh
+./install_elasticsearch_9.0.3.sh  # code/baseline에 위치, 9.x 설치 스크립트
 # "Please confirm that you would like to continue"에서 y 입력하고, 출력되는 비빌번호를 .env에 입력할것.
 
-uv run rag_with_elasticsearch.py
+cd code/rag_with_hydra_reranker
+cp env_template.txt .env   # .env 생성하고 ES/LLM 키 입력
+
+# 평가 실행(기본 설정 사용)
+source scripts/enable_flash_attn_env.sh # flash attention 환경 활성화 (uv run 전에 실행)
+uv run python rag_with_hybrid_reranker_es9_voting.py
+
+# Hydra 구성 오버라이드 예시
+uv run python rag_with_hybrid_reranker_es9_voting.py \
+  retrieve.sparse.enabled=true \
+  retrieve.dense_upstage.enabled=true \
+  retrieve.dense_sbert.enabled=false \
+  retrieve.dense_upstage_hyde.enabled=true \
+  retrieve.dense_gemini.enabled=false \
+  retrieve.dense_gemini_hyde.enabled=false \
+  reranker.use_hard_voting=true reranker.hard_voting.mode=rank_based \
+  dense.mode=ann dense.metric=cosine
 ```
 
-실행 시 동작 개요
-- Elasticsearch 인덱스 `test` 생성(한국어 `nori` 분석기 + `dense_vector` 필드)
-- `input/data/documents.jsonl` 임베딩 생성 후 대량 색인
-- 검색 데모: 질의에 대해 역색인(sparse)·벡터(dense) 검색 예시 출력
-- RAG 파이프라인: 함수 호출형 질의분석 → 검색 → QA 모델로 최종 답변 생성
-- 평가 결과 파일 생성: `code/baseline/sample_submission.csv`
+실행 시 주요 동작
+- 인덱스 분리 생성/재사용: `sparse`(역색인), `upstage`(4096d), `sbert`(768d), `gemini`(3072d)
+  - 공통: 한국어 `nori` 분석기, `dense_vector`는 ES KNN 또는 script_score로 검색
+  - `index.force_recreate=true` 시 활성화된 인덱스만 재생성 및 색인
+- Retrieve 조합: Sparse + Upstage + SBERT + Upstage-HyDE + Gemini + Gemini-HyDE 중 설정된 것만 병합
+  - ANN(knn) 또는 Exact(script_score) 모드 선택: `dense.mode=ann|exact`, metric: `cosine|dot|l2`
+  - Query Embedding 캐시 지원: `utils/query_embedding_cache.py`
+- 하드 보팅 또는 리랭커
+  - Hard voting: `reranker.use_hard_voting=true`
+    - `mode=simple`(중복 소스 개수) 또는 `mode=rank_based`(상위 n 순위 가중)
+  - Reranker(CausalLM): `reranker.use_reranker=true`
+    - 공식 yes/no 스코어 방식, 배치 처리, 메모리 정리 포함
+    - 토크나이저/모델: `transformers.AutoTokenizer/AutoModelForCausalLM`
+- HyDE 지원
+  - Retrieve/리랭킹 모두에 선택적 적용(`prompts.hyde`, `hyde.use_original_query`)
+- LLM 통합 호출 및 디스크 캐시: OpenAI 호환 및 Gemini 모두 지원(`utils/llm_cache.py`)
+- 출력: Hydra `outputs/...` 디렉터리에 결과 JSONL(`paths.output`) 저장
 
+환경 변수 필수 조건
+- LLM 모델 이름에 `gemini` 포함 시: `GEMINI_API_KEY` 또는 `GOOGLE_API_KEY` 필요
+- 그 외(OpenAI 호환): `OPENAI_API_KEY` 필요
+- Elasticsearch: `ELASTICSEARCH_PASSWORD` 필요
+
+Gemini 임베딩 인덱스 주의
+- `gemini` 인덱싱은 API 호출 대신 사전 생성된 임베딩 파일을 사용합니다.
+- 누락 시 에러: 먼저 아래를 실행하여 생성하세요.
+```bash
+uv run python code/rag_with_hydra_reranker/gemini_embedding_generator.py
+```
+
+실행 결과 예시
+- 로그에 Retrieve 요약(각 방식별 추가 건수), 최종 선택 문서 수, 일반질문(eval에서 검색 미수행) 식별 등이 표시됩니다.
+- 결과 파일은 `eval_id`, `standalone_query`, `topk`(문서 id 리스트), `answer`, `references` 포함.
 
 ## 3. Data descrption
 
@@ -128,20 +168,35 @@ uv run rag_with_elasticsearch.py
 
 ## 4. Modeling
 
-### Model descrition
-- Retrieval: Elasticsearch 8.x
-  - Sparse: `match` 쿼리(`nori` 분석기)
-  - Dense: KNN(`dense_vector` with `l2_norm`)
-- Embedding: Sentence-Transformers 한국어 SBERT(`snunlp/KR-SBERT-V40K-klueNLI-augSTS`)
-- LLM: OpenAI 호환(Chat Completions)
-  - 기본값 모델: `gpt-4o-mini`(환경변수로 변경 가능)
-  - 프롬프트: QA용/Function-Calling용 분리 설계
+### Model description
+- Retrieval: Elasticsearch 9.x 기반 하이브리드
+  - Sparse: `match`(한국어 `nori` 분석기)
+  - Dense: 멀티 백엔드 KNN/Exact
+    - Upstage(4096d, `embeddings_upstage`)
+    - Upstage-HyDE(4096d, `embeddings_upstage`)
+    - SBERT(768d, `embeddings_sbert`)
+    - Gemini(3072d, `embeddings_gemini`)
+    - Gemini-HyDE(3072d, `embeddings_gemini`)
+- Embedding 백엔드
+  - Upstage: `langchain_upstage.UpstageEmbeddings`(쿼리/문서 임베딩, 캐시 지원)
+  - SBERT: `snunlp/KR-SBERT-V40K-klueNLI-augSTS`(Sentence-Transformers)
+  - Gemini: 사전 생성 임베딩 파일 사용(동일 순서로 색인)
+- LLM
+  - OpenAI 호환(Chat Completions) 또는 Gemini
+  - 통합 호출 레이어와 디스크 캐시(`utils/llm_cache.py`) 지원
+- Reranking / Voting
+  - Hard voting: source 중복(simple) 또는 상위 n 순위 가중(rank_based)
+  - CausalLM 기반 reranker: yes/no 스코어링, 배치 처리와 메모리 정리 포함
+- HyDE(가상 문서) 지원
+  - Retrieve와 Reranker 모두 선택적 적용, 원쿼리/standalone 쿼리 선택 가능
 
 ### Modeling Process
-- 질의 분석(Function Calling) → `standalone_query` 생성
-- 검색: baseline은 기본적으로 sparse 검색 사용(확장: dense 재랭킹/혼합)
-- QA: 검색된 컨텍스트를 시스템 프롬프트와 함께 LLM에 전달하여 최종 답변 생성
-- 평가: `eval.jsonl`을 순회하며 `standalone_query`, `topk`, `answer`, `references` 기록
+- 질의 분석(Function Calling)로 `standalone_query` 생성
+- Retrieve 실행: 설정된 백엔드(Sparse/Upstage/SBERT/Gemini + HyDE 변형)를 병합 수집
+  - KNN(ANN) 또는 Exact(script_score)로 dense 검색 수행, Query Embedding 캐시 활용
+- 통합 랭킹: Hard voting 또는 CausalLM reranker로 상위 `reranker.top_k` 최종 선택
+- QA(optional): `qa.use_final_answer=true` 시, 선택 문서 컨텍스트를 붙여 최종 답변 생성
+- 출력: 각 질의에 대해 `standalone_query`, `topk`, `answer`, `references`를 JSON Lines로 저장
 
 ## 5. Result
 
@@ -173,9 +228,10 @@ uv run rag_with_elasticsearch.py
 ### 환경변수 요약(.env)
 ```
 ELASTICSEARCH_PASSWORD=필수
-OPENAI_API_KEY=필수
+OPENAI_API_KEY=OpenAI 호환 사용 시 필수(Upstage 포함)
+GEMINI_API_KEY=또는 GOOGLE_API_KEY (Gemini 사용 시 필수)
 OPENAI_BASE_URL=선택
-OPENAI_MODEL=선택(기본: gpt-4o-mini)
+OPENAI_MODEL=선택(기본: config에서 관리)
 ```
 
 ### 경로/권한 이슈
@@ -183,8 +239,11 @@ OPENAI_MODEL=선택(기본: gpt-4o-mini)
 - 로컬 환경에 따라 경로가 다를 수 있으니, 필요 시 `code/baseline/rag_with_elasticsearch.py` 내 Elasticsearch 클라이언트 생성부를 수정하세요.
 
 ### 확장 포인트
-- Dense 검색 가중치/재랭킹 혼합, 하이브리드 검색 성능 개선
-- Hydra 구성(`code/rag_with_hydra/conf/config.yaml`) 기반의 파이프라인 파라미터화 및 실험 관리
+- Dense 검색 모드 전환: `dense.mode=ann|exact`, `dense.metric=cosine|dot|l2`
+- 하드보팅 가중 전략: `reranker.hard_voting.mode=simple|rank_based`, `rank_based_n` 조정
+- 리랭커 대체 모델 및 토큰 커스터마이즈(`true_token/false_token`, `max_length`, `batch_size`)
+- 캐시/지연 설정으로 레이트리밋 대응(`llm.cache.*`, `llm.delay_seconds`)
+- Hydra 구성(`code/rag_with_hydra_reranker/conf/config.yaml`) 기반 파이프라인 파라미터화
 
 <br>
 
